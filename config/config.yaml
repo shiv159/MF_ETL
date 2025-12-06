@@ -1,0 +1,47 @@
+# Configuration for Indian Financial Data Analysis
+
+# Logging configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_file: "logs/financial_data.log"
+  console_output: true
+
+# Data validation thresholds
+validation:
+  nav:
+    min_value: 0.01
+    max_value: 100000
+    max_age_days: 7
+  
+  sector_breakdown:
+    min_sectors: 3
+    total_percentage_tolerance: 1.0  # Allow 1% deviation from 100%
+  
+  index_data:
+    min_constituents: 10
+    max_price_change_percent: 20  # Alert if daily change > 20%
+
+# Data source configurations
+data_sources:
+  mftool:
+    enabled: true
+    timeout: 30
+  
+  yahooquery:
+    enabled: true
+    timeout: 30
+  
+  jugaad_data:
+    enabled: true
+    timeout: 30
+  
+  morningstar:
+    enabled: true
+    timeout: 30
+
+# Output settings
+output:
+  save_raw_data: true
+  data_directory: "data/"
+  export_format: ["json", "csv"]
