@@ -686,11 +686,12 @@ def main():
     # Funds for NAV, holdings, and sector validation
     # - NAV uses mftool (requires scheme code resolution)
     # - Holdings and Sectors use mstarpy (uses fund names directly)
+     #  'HDFC Balanced Advantage Fund',
+      #  'ICICI Prudential Bluechip Fund',
     fund_names = [
-        'HDFC Balanced Advantage Fund',
-        'ICICI Prudential Bluechip Fund',
-        'Parag Parikh Flexi Cap',
-        'SBI Large Cap Fund',
+     
+        'SBI Nifty 50 Index',
+        'HDFC Mid Cap Fund - Growth',
     ]
     
     # Index for validation (uses jugaad-data)

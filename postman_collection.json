@@ -1,0 +1,57 @@
+{
+  "info": {
+    "name": "Mutual Fund Enrichment API",
+    "description": "Exercise the FastAPI enrichment endpoint after Spring Boot has already parsed the holdings.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "1.0",
+    "_postman_id": "f9cd2be1-d502-4c07-b8a2-f63b1ad0d37b"
+  },
+  "item": [
+    {
+      "name": "POST /etl/enrich",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"upload_id\": \"upload-001\",\n  \"user_id\": \"user-789\",\n  \"file_type\": \"pdf\",\n  \"parsed_holdings\": [\n    {\n      \"fund_name\": \"HDFC Mid-Cap Growth\",\n      \"units\": 150.45,\n      \"nav\": 1485.5,\n      \"value\": 223495.48,\n      \"purchase_date\": \"2020-06-15\"\n    },\n    {\n      \"fund_name\": \"SBI Nifty 50 Index\",\n      \"units\": 234.0,\n      \"nav\": 1245.3,\n      \"value\": 291520.0,\n      \"purchase_date\": \"2021-03-10\"\n    }\n  ]\n}"
+        },
+        "url": {
+          "raw": "http://localhost:8081/etl/enrich",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8081",
+          "path": [
+            "etl",
+            "enrich"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('response is successful', function () {", 
+              "    pm.response.to.have.status(200);", 
+              "});", 
+              "const payload = pm.response.json();", 
+              "pm.test('enrichment summary exists', function () {", 
+              "    pm.expect(payload).to.have.property('enrichment_quality');", 
+              "    pm.expect(payload.enriched_funds).to.be.an('array');", 
+              "});"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

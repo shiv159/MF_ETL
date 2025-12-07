@@ -6,6 +6,8 @@ A Python-based ETL (Extract, Transform, Load) tool for fetching, processing, and
 
 This tool provides a comprehensive solution for extracting financial data from multiple sources, validating the data quality, and storing it in structured formats. It focuses on Indian mutual funds, stock indices, and market data with built-in validation mechanisms to ensure data integrity.
 
+Spring Boot or another upstream service now handles parsing uploaded statements and sends the parsed holdings to this FastAPI endpoint for enrichment. The Python component enriches the holdings with NAV metadata, AMCs, sector breakdowns, and Morningstar holdings so downstream systems can focus on scoring and reporting.
+
 ## Features
 
 - **Multi-Source Data Fetching**: Integrates with multiple financial data providers:
@@ -15,10 +17,11 @@ This tool provides a comprehensive solution for extracting financial data from m
   - `yahooquery`: Additional market data
 
 - **Data Validation**: Comprehensive validation for:
-  - NAV (Net Asset Value) data
-  - Mutual fund holdings
-  - Sector allocations and breakdowns
-  - Index constituents and data integrity
+ - **Data Validation**: Comprehensive validation for:
+  - NAV (Net Asset Value) data that powers enrichment lookups
+  - Mutual fund holdings submitted in the parsed payload
+  - Sector allocations and breakdowns retrieved from Morningstar
+  - Index constituents and market data integrity (legacy validators)
 
 - **Configurable Thresholds**: YAML-based configuration for validation rules and data source settings
 
@@ -58,18 +61,34 @@ pip install -r requirements.txt
 
 ## Usage
 
-Run the demo script to see the tool in action:
+Start the Python enrichment service and have Spring Boot call it after it finishes parsing statements:
 
 ```bash
-python demo.py
+uvicorn etl_service.main:app --host 0.0.0.0 --port 8081
 ```
 
-The demo showcases:
-1. Fetching NAV data and validating against expected values
-2. Retrieving mutual fund holdings and checking completeness
-3. Getting sector breakdowns with validation
-4. Fetching NSE index data and validating integrity
-5. Logging all discrepancies and validation results
+### Enrichment API
+
+1. POST `/etl/enrich` with parsed holdings (no file paths or uploads). Example payload:
+   ```json
+   {
+     "upload_id": "upload-001",
+     "user_id": "user-789",
+     "file_type": "pdf",
+     "parsed_holdings": [
+       {
+         "fund_name": "HDFC Mid-Cap Growth",
+         "units": 150.45,
+         "nav": 1485.50,
+         "value": 223495.48,
+         "purchase_date": "2020-06-15"
+       }
+     ]
+   }
+   ```
+2. The service validates the holdings, resolves schemes via `FundEnricher`, and replies with enriched fund metadata plus an `enrichment_quality` summary that lists success/failure counts and any warnings.
+
+This keeps the parsing responsibility upstream while Python focuses on multi-source enrichment and quality reporting.
 
 ## Configuration
 

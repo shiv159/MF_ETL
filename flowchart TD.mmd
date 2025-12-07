@@ -1,0 +1,23 @@
+flowchart TD
+    A["Spring Boot caller with parsed holdings"] --> B["POST /etl/enrich"]
+    B --> C["validate_holdings (units/nav/value checks)"]
+    C --> D{"Valid holdings?"}
+    D -->|no| E["Return EnrichmentResponse(status=failed, warnings, error_message)"]
+    D -->|yes| F["FundEnricher (mftool + MstarPy metadata)"]
+    F --> G["Accumulate enriched_funds + warning list"]
+    G --> H["Compose EnrichmentResponse(status=completed, enrichment_quality, duration)"]
+    B --> I["asyncio.wait_for(_run_enrichment, timeout=120s)"]
+    I --> J["Timeout or exception -> EnrichmentResponse(status=failed, warnings)"]
+
+    %% Styling
+    classDef apiNode fill:#fef3c7,stroke:#f59e0b,stroke-width:1.5px;
+    classDef processNode fill:#ebf8ff,stroke:#0369a1,stroke-width:1.5px;
+    classDef decisionNode fill:#ecfccb,stroke:#16a34a,stroke-width:1.5px;
+    classDef failureNode fill:#fee2e2,stroke:#b91c1c,stroke-width:1.5px;
+    classDef endNode fill:#dcfce7,stroke:#15803d,stroke-width:1.5px;
+
+    class A,B apiNode;
+    class C,F,G processNode;
+    class D decisionNode;
+    class E,J failureNode;
+    class H endNode;
