@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -66,9 +66,13 @@ def _build_error_response(upload_id: Optional[str], error_message: str, warnings
 def _run_enrichment(request: EnrichmentRequest) -> Dict:
     logger.info("Start enrichment for upload_id=%s", request.upload_id)
     holdings_payload = [holding.dict() for holding in request.parsed_holdings]
+    logger.info("Validating %d holdings: %s", len(holdings_payload), holdings_payload)
     validated_holdings, validation_warnings = validate_holdings(holdings_payload)
+    logger.info("Validation result: %d valid, warnings: %s", len(validated_holdings), validation_warnings)
     if not validated_holdings:
-        raise ValueError("No valid holdings available for enrichment")
+        error_msg = "; ".join(validation_warnings) if validation_warnings else "No valid holdings available for enrichment"
+        logger.error("Holdings validation failed: %s", error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
 
     enriched_funds = []
     warnings = validation_warnings.copy()
@@ -126,7 +130,7 @@ async def enrich(request: EnrichmentRequest):
         duration = int(time.time() - start_time)
         quality = EnrichmentQuality(**payload["enrichment_quality"])
 
-        return EnrichmentResponse(
+        response = EnrichmentResponse(
             upload_id=request.upload_id,
             status="completed",
             duration_seconds=duration,
@@ -134,8 +138,49 @@ async def enrich(request: EnrichmentRequest):
             enrichment_quality=quality,
             error_message=None,
         )
+        
+        # Log response details
+        logger.info("=" * 80)
+        logger.info("ENRICHMENT RESPONSE")
+        logger.info("=" * 80)
+        logger.info(f"Upload ID: {response.upload_id}")
+        logger.info(f"Status: {response.status}")
+        logger.info(f"Duration: {response.duration_seconds}s")
+        logger.info(f"Successfully enriched: {response.enrichment_quality.successfully_enriched}")
+        logger.info(f"Failed to enrich: {response.enrichment_quality.failed_to_enrich}")
+        
+        if response.enriched_funds:
+            logger.info(f"\nEnriched {len(response.enriched_funds)} funds:")
+            for i, fund in enumerate(response.enriched_funds, 1):
+                logger.info(f"  [{i}] {fund.fund_name}")
+                logger.info(f"      ISIN: {fund.isin}")
+                logger.info(f"      AMC: {fund.amc}")
+                logger.info(f"      Category: {fund.category}")
+                logger.info(f"      Current NAV: {fund.current_nav}")
+                logger.info(f"      NAV As Of: {fund.nav_as_of}")
+                logger.info(f"      Expense Ratio: {fund.expense_ratio}%")
+                if fund.top_holdings:
+                    logger.info(f"      Top Holdings: {len(fund.top_holdings)} holdings")
+                if fund.sector_allocation:
+                    logger.info(f"      Sectors: {len(fund.sector_allocation)} sectors")
+        
+        if response.enrichment_quality.warnings:
+            logger.warning(f"\nWarnings ({len(response.enrichment_quality.warnings)}):")
+            for warning in response.enrichment_quality.warnings:
+                logger.warning(f"  - {warning}")
+        
+        logger.info("=" * 80)
+        
+        return response
     except asyncio.TimeoutError as exc:
         logger.error("Enrichment processing timed out: %s", exc)
+        logger.error("=" * 80)
+        logger.error("ENRICHMENT RESPONSE - TIMEOUT")
+        logger.error("=" * 80)
+        logger.error(f"Upload ID: {request.upload_id}")
+        logger.error("Status: failed")
+        logger.error("Reason: Processing timed out after %d seconds", TIMEOUT_SECONDS)
+        logger.error("=" * 80)
         fallback_quality = EnrichmentQuality(
             successfully_enriched=0,
             failed_to_enrich=0,
@@ -151,6 +196,13 @@ async def enrich(request: EnrichmentRequest):
         )
     except Exception as exc:
         logger.error("Enrichment processing failed: %s", exc, exc_info=True)
+        logger.error("=" * 80)
+        logger.error("ENRICHMENT RESPONSE - ERROR")
+        logger.error("=" * 80)
+        logger.error(f"Upload ID: {request.upload_id}")
+        logger.error("Status: failed")
+        logger.error(f"Error: {str(exc)}")
+        logger.error("=" * 80)
         fallback_quality = EnrichmentQuality(
             successfully_enriched=0,
             failed_to_enrich=0,

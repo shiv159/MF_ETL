@@ -13,6 +13,7 @@ import os
 import sys
 import json
 import time
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -90,6 +91,53 @@ class FinancialDataDemo:
         )
         
         self.logger.info("=" * 80)
+    
+    def _generate_fallback_search_terms(self, fund_name: str, scheme_name: str) -> list:
+        """
+        Generate additional search terms when primary resolution fails in mstarpy.
+        Tries progressively simpler name variations to improve match rate.
+        
+        Args:
+            fund_name: Original user-provided fund name
+            scheme_name: Official AMFI scheme name from mftool
+        
+        Returns:
+            List of alternative search terms to try
+        """
+        fallback_terms = []
+        
+        # 1. Try the user-provided name (they might have used a common abbreviation)
+        if fund_name and fund_name.lower() != scheme_name.lower():
+            fallback_terms.append(fund_name)
+        
+        # 2. Try removing plan type suffixes (Direct, Regular, Growth, Dividend, etc.)
+        plan_suffixes = r'\s*-\s*(Direct|Regular|GROWTH|DIVIDEND|Growth|Dividend|Monthly|Annual|IDCW|Payout|Reinvestment|Growth|Bonus|Hedged).*$'
+        stripped_name = re.sub(plan_suffixes, '', scheme_name, flags=re.IGNORECASE).strip()
+        if stripped_name and stripped_name not in fallback_terms:
+            fallback_terms.append(stripped_name)
+        
+        # 3. Try removing parenthetical content (NFO info, etc.)
+        cleaned = re.sub(r'\s*\(.*?\)\s*', ' ', scheme_name).strip()
+        if cleaned and cleaned not in fallback_terms:
+            fallback_terms.append(cleaned)
+        
+        # 4. Try first N words (core fund name, typically 3 words)
+        words = cleaned.split()
+        if len(words) > 2:
+            core_name = ' '.join(words[:3])
+            if core_name not in fallback_terms:
+                fallback_terms.append(core_name)
+        
+        # 5. Try just AMC + category (e.g., "Motilal Oswal Midcap")
+        words = scheme_name.split()
+        if len(words) >= 2:
+            amc_category = ' '.join(words[:min(3, len(words))])
+            if amc_category not in fallback_terms:
+                fallback_terms.append(amc_category)
+        
+        self.logger.debug(f"Generated {len(fallback_terms)} fallback search terms for '{fund_name}'")
+        return fallback_terms
+        
     def demo_nav_validation(self, fund_names):
         """
         Demo 1: Fetch mutual fund NAV data and validate
@@ -112,6 +160,18 @@ class FinancialDataDemo:
         # Resolve fund names to scheme codes
         self.logger.info("Resolving fund names...")
         resolved_funds = self.fund_resolver.resolve_funds(fund_names)
+        
+        # Log resolution details
+        for resolved in resolved_funds:
+            self.logger.info(f"\nResolution Details for '{resolved['name']}':")
+            self.logger.info(f"  ├─ mftool_scheme_code: {resolved.get('mftool_scheme_code')}")
+            self.logger.info(f"  ├─ mftool_scheme_name: {resolved.get('mftool_scheme_name')}")
+            self.logger.info(f"  ├─ mstarpy_search_term: {resolved.get('mstarpy_search_term')}")
+            alternates = resolved.get('mstarpy_alternate_terms', [])
+            if alternates:
+                self.logger.info(f"  └─ mstarpy_alternates ({len(alternates)}):")
+                for alt in alternates:
+                    self.logger.info(f"      └─ {alt}")
         
         results = {
             'total': len(resolved_funds),
@@ -204,6 +264,18 @@ class FinancialDataDemo:
         self.logger.info("Resolving fund names...")
         resolved_funds = self.fund_resolver.resolve_funds(fund_names)
         
+        # Log resolution details
+        for resolved in resolved_funds:
+            self.logger.info(f"\nResolution Details for '{resolved['name']}':")
+            self.logger.info(f"  ├─ mftool_scheme_code: {resolved.get('mftool_scheme_code')}")
+            self.logger.info(f"  ├─ mftool_scheme_name: {resolved.get('mftool_scheme_name')}")
+            self.logger.info(f"  ├─ mstarpy_search_term: {resolved.get('mstarpy_search_term')}")
+            alternates = resolved.get('mstarpy_alternate_terms', [])
+            if alternates:
+                self.logger.info(f"  └─ mstarpy_alternates ({len(alternates)}):")
+                for alt in alternates:
+                    self.logger.info(f"      └─ {alt}")
+        
         results = {
             'total': len(resolved_funds),
             'passed': 0,
@@ -216,6 +288,7 @@ class FinancialDataDemo:
             fund_name = fund_info['name']
             search_term = fund_info['mstarpy_search_term']
             alternates = fund_info.get('mstarpy_alternate_terms', [])
+            scheme_name = fund_info.get('mftool_scheme_name', '')
             
             fund_start = time.time()
             self.logger.info(f"\n[{idx}/{len(resolved_funds)}] Processing fund: {fund_name}")
@@ -234,6 +307,21 @@ class FinancialDataDemo:
                 except Exception as e:
                     self.logger.debug(f"Search term '{term}' failed: {str(e)}")
                     continue
+            
+            # If primary search terms failed, try fallback search terms
+            if holdings_df is None or holdings_df.empty:
+                self.logger.info(f"Primary search failed, generating fallback search terms for '{fund_name}'")
+                fallback_terms = self._generate_fallback_search_terms(fund_name, scheme_name)
+                for term in fallback_terms:
+                    try:
+                        self.logger.info(f"Trying fallback search term: {term}")
+                        holdings_df = self.mstarpy_fetcher.get_fund_holdings(term, top_n=50)
+                        if holdings_df is not None and not holdings_df.empty:
+                            self.logger.info(f"Successfully matched fund with fallback term: '{term}'")
+                            break
+                    except Exception as e:
+                        self.logger.debug(f"Fallback search term '{term}' failed: {str(e)}")
+                        continue
             
             try:
                 
@@ -330,6 +418,18 @@ class FinancialDataDemo:
         self.logger.info("Resolving fund names...")
         resolved_funds = self.fund_resolver.resolve_funds(fund_names)
         
+        # Log resolution details
+        for resolved in resolved_funds:
+            self.logger.info(f"\nResolution Details for '{resolved['name']}':")
+            self.logger.info(f"  ├─ mftool_scheme_code: {resolved.get('mftool_scheme_code')}")
+            self.logger.info(f"  ├─ mftool_scheme_name: {resolved.get('mftool_scheme_name')}")
+            self.logger.info(f"  ├─ mstarpy_search_term: {resolved.get('mstarpy_search_term')}")
+            alternates = resolved.get('mstarpy_alternate_terms', [])
+            if alternates:
+                self.logger.info(f"  └─ mstarpy_alternates ({len(alternates)}):")
+                for alt in alternates:
+                    self.logger.info(f"      └─ {alt}")
+        
         results = {
             'total': len(resolved_funds),
             'passed': 0,
@@ -342,6 +442,7 @@ class FinancialDataDemo:
             fund_name = fund_info['name']
             search_term = fund_info['mstarpy_search_term']
             alternates = fund_info.get('mstarpy_alternate_terms', [])
+            scheme_name = fund_info.get('mftool_scheme_name', '')
             
             fund_start = time.time()
             self.logger.info(f"\n[{idx}/{len(resolved_funds)}] Processing fund: {fund_name}")
@@ -355,11 +456,26 @@ class FinancialDataDemo:
                     self.logger.info(f"Trying search term: {term}")
                     sector_result = self.mstarpy_fetcher.get_sector_allocation(term)
                     if sector_result is not None:
-                        self.logger.info(f"Successfully matched fund with term: '{term}'\"")
+                        self.logger.info(f"Successfully matched fund with term: '{term}'")
                         break
                 except Exception as e:
                     self.logger.debug(f"Search term '{term}' failed: {str(e)}")
                     continue
+            
+            # If primary search terms failed, try fallback search terms
+            if sector_result is None:
+                self.logger.info(f"Primary search failed, generating fallback search terms for '{fund_name}'")
+                fallback_terms = self._generate_fallback_search_terms(fund_name, scheme_name)
+                for term in fallback_terms:
+                    try:
+                        self.logger.info(f"Trying fallback search term: {term}")
+                        sector_result = self.mstarpy_fetcher.get_sector_allocation(term)
+                        if sector_result is not None:
+                            self.logger.info(f"Successfully matched fund with fallback term: '{term}'")
+                            break
+                    except Exception as e:
+                        self.logger.debug(f"Fallback search term '{term}' failed: {str(e)}")
+                        continue
             
             try:
                 if sector_result is None:
@@ -689,9 +805,7 @@ def main():
      #  'HDFC Balanced Advantage Fund',
       #  'ICICI Prudential Bluechip Fund',
     fund_names = [
-     
-        'SBI Nifty 50 Index',
-        'HDFC Mid Cap Fund - Growth',
+        'Motilal Oswal Midcap Direct Growth',
     ]
     
     # Index for validation (uses jugaad-data)

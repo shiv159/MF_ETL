@@ -101,6 +101,31 @@ class FundEnricher:
         self.logger.debug("Unable to normalize sector data from %s", type(sector_result))
         return None
 
+    def _fetch_isin_from_mstarpy(self, fund_name: str, search_terms: List[str]) -> Optional[str]:
+        """
+        Try to get ISIN directly from mstarpy by searching for the fund
+        
+        Args:
+            fund_name: Original fund name for logging
+            search_terms: List of search terms to try (primary + alternates)
+        
+        Returns:
+            ISIN if found, None otherwise
+        """
+        for term in search_terms:
+            if not term:
+                continue
+            try:
+                self.logger.debug(f"Attempting to fetch ISIN from mstarpy using term: {term}")
+                fund = self.mstar_fetcher.get_fund(term)
+                if fund and hasattr(fund, 'isin') and fund.isin:
+                    self.logger.info(f"Found ISIN '{fund.isin}' for '{fund_name}' using term '{term}'")
+                    return fund.isin
+            except Exception as e:
+                self.logger.debug(f"ISIN lookup failed for term '{term}': {str(e)}")
+                continue
+        return None
+
     def enrich(self, fund_name: str) -> Optional[EnrichedFund]:
         resolved = self.resolver.resolve_fund(fund_name)
         scheme_code = resolved.get('mftool_scheme_code')
@@ -122,12 +147,26 @@ class FundEnricher:
         sector_allocation = details.get('sector_allocation') or details.get('sectorBreakup')
         top_holdings = details.get('top_holdings') or details.get('top_holdings_data')
 
+        # Build search terms early for ISIN lookup
+        search_terms = self._get_mstar_search_terms(resolved)
+        
         # Prefer any available ISIN so we can enrich via Morningstar
         isin_candidates = [
-            scheme_code # Fallback to scheme_code if no ISIN found
+            details.get('isin'),
+            nav_data.get('isin') if isinstance(nav_data, dict) else None,
+            details.get('fund_isin'),
+            details.get('isin_code'),
         ]
         fund_isin = next((value for value in isin_candidates if value), None)
-        search_terms = self._get_mstar_search_terms(resolved)
+        
+        # If no ISIN found in mftool, try to fetch from mstarpy directly
+        if not fund_isin and search_terms:
+            fund_isin = self._fetch_isin_from_mstarpy(fund_name, search_terms)
+        
+        # Fallback to scheme_code if still no ISIN
+        if not fund_isin:
+            fund_isin = scheme_code
+        
         holdings_detail = None
         sector_detail = None
 
@@ -137,11 +176,29 @@ class FundEnricher:
 
         if not holdings_detail and search_terms:
             holdings_detail = self._fetch_holdings_from_mstar_terms(search_terms)
+        
+        # If primary search terms failed, try fallback search terms
+        if not holdings_detail:
+            scheme_name = resolved.get('mftool_scheme_name') or ''
+            fallback_terms = self._generate_fallback_search_terms(fund_name, scheme_name)
+            if fallback_terms:
+                self.logger.info(f"Primary search failed for holdings, trying {len(fallback_terms)} fallback terms for '{fund_name}'")
+                holdings_detail = self._fetch_holdings_from_mstar_terms(fallback_terms)
+        
         if holdings_detail:
             top_holdings = holdings_detail
 
         if not sector_detail and search_terms:
             sector_detail = self._fetch_sector_from_mstar_terms(search_terms)
+        
+        # If primary search terms failed, try fallback search terms
+        if not sector_detail:
+            scheme_name = resolved.get('mftool_scheme_name') or ''
+            fallback_terms = self._generate_fallback_search_terms(fund_name, scheme_name)
+            if fallback_terms:
+                self.logger.info(f"Primary search failed for sectors, trying {len(fallback_terms)} fallback terms for '{fund_name}'")
+                sector_detail = self._fetch_sector_from_mstar_terms(fallback_terms)
+        
         if sector_detail:
             sector_allocation = sector_detail
 
@@ -228,3 +285,50 @@ class FundEnricher:
             if alt and alt not in terms:
                 terms.append(alt)
         return terms
+
+    def _generate_fallback_search_terms(self, fund_name: str, scheme_name: str) -> List[str]:
+        """
+        Generate additional search terms when primary resolution fails in mstarpy.
+        Tries progressively simpler name variations to improve match rate.
+        
+        Args:
+            fund_name: Original user-provided fund name
+            scheme_name: Official AMFI scheme name from mftool
+        
+        Returns:
+            List of alternative search terms to try
+        """
+        fallback_terms = []
+        
+        # 1. Try the user-provided name (they might have used a common abbreviation)
+        if fund_name and fund_name.lower() != scheme_name.lower():
+            fallback_terms.append(fund_name)
+        
+        # 2. Try removing plan type suffixes (Direct, Regular, Growth, Dividend, etc.)
+        import re
+        plan_suffixes = r'\s*-\s*(Direct|Regular|GROWTH|DIVIDEND|Growth|Dividend|Monthly|Annual|IDCW|Payout|Reinvestment|Growth|Bonus|Hedged).*$'
+        stripped_name = re.sub(plan_suffixes, '', scheme_name, flags=re.IGNORECASE).strip()
+        if stripped_name and stripped_name not in fallback_terms:
+            fallback_terms.append(stripped_name)
+        
+        # 3. Try removing parenthetical content (NFO info, etc.)
+        cleaned = re.sub(r'\s*\(.*?\)\s*', ' ', scheme_name).strip()
+        if cleaned and cleaned not in fallback_terms:
+            fallback_terms.append(cleaned)
+        
+        # 4. Try first N words (core fund name, typically 2-3 words)
+        words = cleaned.split()
+        if len(words) > 2:
+            core_name = ' '.join(words[:3])  # e.g., "Motilal Oswal Midcap"
+            if core_name not in fallback_terms:
+                fallback_terms.append(core_name)
+        
+        # 5. Try just AMC + category (e.g., "Motilal Oswal Midcap")
+        words = scheme_name.split()
+        if len(words) >= 2:
+            amc_category = ' '.join(words[:min(3, len(words))])
+            if amc_category not in fallback_terms:
+                fallback_terms.append(amc_category)
+        
+        self.logger.debug(f"Generated {len(fallback_terms)} fallback search terms for '{fund_name}'")
+        return fallback_terms

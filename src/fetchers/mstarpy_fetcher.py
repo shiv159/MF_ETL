@@ -30,6 +30,25 @@ class MstarPyFetcher:
         if self.logger:
             getattr(self.logger, level)(message)
     
+    def get_fund(self, term: str) -> Optional[Any]:
+        """
+        Get a fund object directly from mstarpy
+        
+        Args:
+            term: Search term (fund name, ISIN, or ticker)
+            
+        Returns:
+            mstarpy.Funds object or None if not found
+        """
+        try:
+            self._log('debug', f"Looking up fund: {term}")
+            fund = mstarpy.Funds(term=term)
+            self._log('debug', f"Successfully created Funds object for: {term}")
+            return fund
+        except Exception as e:
+            self._log('debug', f"Error creating Funds object for '{term}': {str(e)}")
+            return None
+    
     def get_fund_holdings(self, fund_isin: str, top_n: int = 20) -> Optional[pd.DataFrame]:
         """
         Fetch portfolio holdings for a mutual fund
