@@ -124,10 +124,7 @@ class FundEnricher:
 
         # Prefer any available ISIN so we can enrich via Morningstar
         isin_candidates = [
-            details.get('isin'),
-            nav_data.get('isin') if isinstance(nav_data, dict) else None,
-            details.get('fund_isin'),
-            details.get('isin_code'),
+            scheme_code # Fallback to scheme_code if no ISIN found
         ]
         fund_isin = next((value for value in isin_candidates if value), None)
         search_terms = self._get_mstar_search_terms(resolved)
