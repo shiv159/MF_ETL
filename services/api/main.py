@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
+import sys
 import time
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, Request, HTTPException
@@ -9,13 +11,34 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from etl_service.enrichment.fund_enricher import FundEnricher
-from etl_service.models.request_models import EnrichmentRequest
-from etl_service.models.response_models import (
+from services.enrichment.fund_enricher import FundEnricher
+from services.api.models.request_models import EnrichmentRequest
+from services.api.models.response_models import (
     EnrichmentQuality,
     EnrichmentResponse,
 )
-from etl_service.validators.holding_validator import validate_holdings
+from services.enrichment.holding_validator import validate_holdings
+
+# Add src to path for importing config_loader
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.mf_etl.utils.config_loader import load_config  # noqa: E402
+
+# Load configuration from YAML file
+try:
+    config = load_config('config/config.yaml')
+except FileNotFoundError:
+    print("Warning: config/config.yaml not found. Using default values.")
+    config = {}
+
+# Extract configuration values with defaults
+timeout_config = config.get('timeout_config', {})
+TIMEOUT_SECONDS = timeout_config.get('enrichment_timeout', 120)
+
+logging_config = config.get('logging', {})
+log_level = logging_config.get('level', 'INFO')
 
 logger = logging.getLogger("etl_service")
 if not logger.handlers:
@@ -24,7 +47,7 @@ if not logger.handlers:
         logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     )
     logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logger.setLevel(getattr(logging, log_level, logging.INFO))
 
 app = FastAPI(title="ETL Enrichment Service")
 app.add_middleware(

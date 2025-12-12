@@ -5,15 +5,15 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
-from etl_service.models.response_models import EnrichedFund
+from services.api.models.response_models import EnrichedFund
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.fetchers.mftool_fetcher import MFToolFetcher  # noqa: E402
-from src.fetchers.mstarpy_fetcher import MstarPyFetcher  # noqa: E402
-from src.utils.fund_resolver import FundResolver  # noqa: E402
+from src.mf_etl.fetchers.mftool_fetcher import MFToolFetcher  # noqa: E402
+from src.mf_etl.fetchers.mstarpy_fetcher import MstarPyFetcher  # noqa: E402
+from src.mf_etl.services.fund_resolver import FundResolver  # noqa: E402
 
 
 logger = logging.getLogger(__name__)

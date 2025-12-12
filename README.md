@@ -2,6 +2,7 @@
 
 A Python-based ETL (Extract, Transform, Load) tool for fetching, processing, and validating Indian mutual fund and financial market data.
 
+uvicorn etl_service.main:app --host 0.0.0.0 --port 8081
 ## Overview
 
 This tool provides a comprehensive solution for extracting financial data from multiple sources, validating the data quality, and storing it in structured formats. It focuses on Indian mutual funds, stock indices, and market data with built-in validation mechanisms to ensure data integrity.

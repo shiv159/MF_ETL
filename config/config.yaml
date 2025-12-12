@@ -7,6 +7,11 @@ logging:
   log_file: "logs/financial_data.log"
   console_output: true
 
+# Timeout configuration
+timeout_config:
+  enrichment_timeout: 120  # API enrichment timeout in seconds
+  fetcher_timeout: 30      # Individual fetcher timeout in seconds
+
 # Data validation thresholds
 validation:
   nav:
