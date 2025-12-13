@@ -14,6 +14,11 @@ if str(ROOT) not in sys.path:
 from src.mf_etl.fetchers.mftool_fetcher import MFToolFetcher  # noqa: E402
 from src.mf_etl.fetchers.mstarpy_fetcher import MstarPyFetcher  # noqa: E402
 from src.mf_etl.services.fund_resolver import FundResolver  # noqa: E402
+from src.mf_etl.utils.search_utils import (  # noqa: E402
+    generate_fallback_search_terms,
+    safe_float,
+    normalize_sector_result,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -42,14 +47,10 @@ class FundEnricher:
                 best = SchemeMatch(code=scheme['code'], name=scheme['name'], score=ratio)
         return best
 
-    # Normalize numeric strings to floats, stripping commas and whitespace
+    # Normalize numeric strings to floats, using shared utility
     def _safe_float(self, value: Optional[str]) -> Optional[float]:
-        if value is None:
-            return None
-        try:
-            return float(str(value).replace(',', '').strip())
-        except ValueError:
-            return None
+        result = safe_float(value, default=None)
+        return result
 
     def _normalize_sector_result(self, sector_result: Any) -> Optional[Dict[str, float]]:
         if not sector_result:
@@ -289,46 +290,6 @@ class FundEnricher:
     def _generate_fallback_search_terms(self, fund_name: str, scheme_name: str) -> List[str]:
         """
         Generate additional search terms when primary resolution fails in mstarpy.
-        Tries progressively simpler name variations to improve match rate.
-        
-        Args:
-            fund_name: Original user-provided fund name
-            scheme_name: Official AMFI scheme name from mftool
-        
-        Returns:
-            List of alternative search terms to try
+        Uses shared utility function to ensure consistency with demo and other modules.
         """
-        fallback_terms = []
-        
-        # 1. Try the user-provided name (they might have used a common abbreviation)
-        if fund_name and fund_name.lower() != scheme_name.lower():
-            fallback_terms.append(fund_name)
-        
-        # 2. Try removing plan type suffixes (Direct, Regular, Growth, Dividend, etc.)
-        import re
-        plan_suffixes = r'\s*-\s*(Direct|Regular|GROWTH|DIVIDEND|Growth|Dividend|Monthly|Annual|IDCW|Payout|Reinvestment|Growth|Bonus|Hedged).*$'
-        stripped_name = re.sub(plan_suffixes, '', scheme_name, flags=re.IGNORECASE).strip()
-        if stripped_name and stripped_name not in fallback_terms:
-            fallback_terms.append(stripped_name)
-        
-        # 3. Try removing parenthetical content (NFO info, etc.)
-        cleaned = re.sub(r'\s*\(.*?\)\s*', ' ', scheme_name).strip()
-        if cleaned and cleaned not in fallback_terms:
-            fallback_terms.append(cleaned)
-        
-        # 4. Try first N words (core fund name, typically 2-3 words)
-        words = cleaned.split()
-        if len(words) > 2:
-            core_name = ' '.join(words[:3])  # e.g., "Motilal Oswal Midcap"
-            if core_name not in fallback_terms:
-                fallback_terms.append(core_name)
-        
-        # 5. Try just AMC + category (e.g., "Motilal Oswal Midcap")
-        words = scheme_name.split()
-        if len(words) >= 2:
-            amc_category = ' '.join(words[:min(3, len(words))])
-            if amc_category not in fallback_terms:
-                fallback_terms.append(amc_category)
-        
-        self.logger.debug(f"Generated {len(fallback_terms)} fallback search terms for '{fund_name}'")
-        return fallback_terms
+        return generate_fallback_search_terms(fund_name, scheme_name)

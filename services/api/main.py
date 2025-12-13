@@ -91,31 +91,39 @@ def _run_enrichment(request: EnrichmentRequest) -> Dict:
     logger.info("Validating %d holdings: %s", len(holdings_payload), holdings_payload)
     validated_holdings, validation_warnings = validate_holdings(holdings_payload)
     logger.info("Validation result: %d valid, warnings: %s", len(validated_holdings), validation_warnings)
-    if not validated_holdings:
-        error_msg = "; ".join(validation_warnings) if validation_warnings else "No valid holdings available for enrichment"
-        logger.error("Holdings validation failed: %s", error_msg)
-        raise HTTPException(status_code=400, detail=error_msg)
-
+    
+    # Continue with valid holdings even if some fail validation (partial success)
+    validation_failures = len(holdings_payload) - len(validated_holdings)
+    
     enriched_funds = []
     warnings = validation_warnings.copy()
-    for holding in validated_holdings:
-        fund_name = holding["fund_name"]
-        try:
-            fund_data = enricher.enrich(fund_name)
-            if fund_data:
-                enriched_funds.append(fund_data)
-            else:
-                message = f"Could not enrich '{fund_name}'"
+    
+    if not validated_holdings:
+        # If no holdings passed validation, return partial success with all holdings marked as failed
+        error_msg = "; ".join(validation_warnings) if validation_warnings else "No valid holdings available for enrichment"
+        logger.warning("Holdings validation failed: %s", error_msg)
+        warnings.append(error_msg)
+    else:
+        # Process valid holdings (partial success even if some failed validation)
+        for holding in validated_holdings:
+            fund_name = holding["fund_name"]
+            try:
+                fund_data = enricher.enrich(fund_name)
+                if fund_data:
+                    enriched_funds.append(fund_data)
+                else:
+                    message = f"Could not enrich '{fund_name}'"
+                    warnings.append(message)
+                    logger.warning(message)
+            except Exception as exc:
+                message = f"Enrichment failed for '{fund_name}': {exc}"
                 warnings.append(message)
                 logger.warning(message)
-        except Exception as exc:
-            message = f"Enrichment failed for '{fund_name}': {exc}"
-            warnings.append(message)
-            logger.warning(message)
 
     enrichment_quality = {
         "successfully_enriched": len(enriched_funds),
         "failed_to_enrich": len(validated_holdings) - len(enriched_funds),
+        "validation_failures": validation_failures,
         "warnings": warnings,
     }
 
