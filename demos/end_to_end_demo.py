@@ -17,8 +17,8 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+# Add root to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.mf_etl.fetchers.mftool_fetcher import MFToolFetcher
 from src.mf_etl.fetchers.jugaad_fetcher import JugaadDataFetcher
@@ -164,14 +164,14 @@ class FinancialDataDemo:
         # Log resolution details
         for resolved in resolved_funds:
             self.logger.info(f"\nResolution Details for '{resolved['name']}':")
-            self.logger.info(f"  ├─ mftool_scheme_code: {resolved.get('mftool_scheme_code')}")
-            self.logger.info(f"  ├─ mftool_scheme_name: {resolved.get('mftool_scheme_name')}")
-            self.logger.info(f"  ├─ mstarpy_search_term: {resolved.get('mstarpy_search_term')}")
+            self.logger.info(f"  [*] mftool_scheme_code: {resolved.get('mftool_scheme_code')}")
+            self.logger.info(f"  [*] mftool_scheme_name: {resolved.get('mftool_scheme_name')}")
+            self.logger.info(f"  [*] mstarpy_search_term: {resolved.get('mstarpy_search_term')}")
             alternates = resolved.get('mstarpy_alternate_terms', [])
             if alternates:
-                self.logger.info(f"  └─ mstarpy_alternates ({len(alternates)}):")
+                self.logger.info(f"  [*] mstarpy_alternates ({len(alternates)}):")
                 for alt in alternates:
-                    self.logger.info(f"      └─ {alt}")
+                    self.logger.info(f"      [-] {alt}")
         
         results = {
             'total': len(resolved_funds),
@@ -267,14 +267,14 @@ class FinancialDataDemo:
         # Log resolution details
         for resolved in resolved_funds:
             self.logger.info(f"\nResolution Details for '{resolved['name']}':")
-            self.logger.info(f"  ├─ mftool_scheme_code: {resolved.get('mftool_scheme_code')}")
-            self.logger.info(f"  ├─ mftool_scheme_name: {resolved.get('mftool_scheme_name')}")
-            self.logger.info(f"  ├─ mstarpy_search_term: {resolved.get('mstarpy_search_term')}")
+            self.logger.info(f"  [*] mftool_scheme_code: {resolved.get('mftool_scheme_code')}")
+            self.logger.info(f"  [*] mftool_scheme_name: {resolved.get('mftool_scheme_name')}")
+            self.logger.info(f"  [*] mstarpy_search_term: {resolved.get('mstarpy_search_term')}")
             alternates = resolved.get('mstarpy_alternate_terms', [])
             if alternates:
-                self.logger.info(f"  └─ mstarpy_alternates ({len(alternates)}):")
+                self.logger.info(f"  [*] mstarpy_alternates ({len(alternates)}):")
                 for alt in alternates:
-                    self.logger.info(f"      └─ {alt}")
+                    self.logger.info(f"      [-] {alt}")
         
         results = {
             'total': len(resolved_funds),
@@ -421,14 +421,14 @@ class FinancialDataDemo:
         # Log resolution details
         for resolved in resolved_funds:
             self.logger.info(f"\nResolution Details for '{resolved['name']}':")
-            self.logger.info(f"  ├─ mftool_scheme_code: {resolved.get('mftool_scheme_code')}")
-            self.logger.info(f"  ├─ mftool_scheme_name: {resolved.get('mftool_scheme_name')}")
-            self.logger.info(f"  ├─ mstarpy_search_term: {resolved.get('mstarpy_search_term')}")
+            self.logger.info(f"  [*] mftool_scheme_code: {resolved.get('mftool_scheme_code')}")
+            self.logger.info(f"  [*] mftool_scheme_name: {resolved.get('mftool_scheme_name')}")
+            self.logger.info(f"  [*] mstarpy_search_term: {resolved.get('mstarpy_search_term')}")
             alternates = resolved.get('mstarpy_alternate_terms', [])
             if alternates:
-                self.logger.info(f"  └─ mstarpy_alternates ({len(alternates)}):")
+                self.logger.info(f"  [*] mstarpy_alternates ({len(alternates)}):")
                 for alt in alternates:
-                    self.logger.info(f"      └─ {alt}")
+                    self.logger.info(f"      [-] {alt}")
         
         results = {
             'total': len(resolved_funds),
