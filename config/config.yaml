@@ -9,7 +9,7 @@ logging:
 
 # Timeout configuration
 timeout_config:
-  enrichment_timeout: 120  # API enrichment timeout in seconds
+  enrichment_timeout: 300  # API enrichment timeout in seconds
   fetcher_timeout: 30      # Individual fetcher timeout in seconds
 
 # Data validation thresholds

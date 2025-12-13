@@ -59,7 +59,6 @@ app.add_middleware(
 )
 
 enricher = FundEnricher(logger)
-TIMEOUT_SECONDS = 120
 
 
 def _extract_upload_id_from_body(body: bytes) -> Optional[str]:

@@ -16,23 +16,26 @@ def validate_holdings(holdings: List[Dict]) -> Tuple[List[Dict], List[str]]:
         nav = h.get('nav')
         value = h.get('value')
 
-        if units is None or nav is None:
-            warnings.append(f"{fund_name}: units/nav missing")
+        if units is not None and units <= 0:
+            warnings.append(f"{fund_name}: units must be positive")
             continue
-        if units <= 0 or nav <= 0:
-            warnings.append(f"{fund_name}: units/nav must be positive")
+
+        if nav is not None and nav <= 0:
+            warnings.append(f"{fund_name}: nav must be positive")
             continue
 
         if value is None:
-            value = units * nav
+            if units is not None and nav is not None:
+                value = units * nav
         else:
-            expected = units * nav
-            if expected > 0:
-                deviation = abs(value - expected) / expected
-                if deviation > 0.02:
-                    warnings.append(
-                        f"{fund_name}: reported value {value:.2f} deviates from units*nav {expected:.2f} by {deviation * 100:.2f}%"
-                    )
+            if units is not None and nav is not None:
+                expected = units * nav
+                if expected > 0:
+                    deviation = abs(value - expected) / expected
+                    if deviation > 0.02:
+                        warnings.append(
+                            f"{fund_name}: reported value {value:.2f} deviates from units*nav {expected:.2f} by {deviation * 100:.2f}%"
+                        )
 
         validated.append({
             'fund_name': fund_name,
