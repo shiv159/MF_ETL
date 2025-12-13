@@ -41,6 +41,9 @@ def setup_logger(
         console_handler = logging.StreamHandler()
         console_handler.setLevel(level)
         console_handler.setFormatter(formatter)
+        # Handle unicode on Windows
+        if hasattr(console_handler.stream, 'reconfigure'):
+            console_handler.stream.reconfigure(encoding='utf-8')
         logger.addHandler(console_handler)
     
     # File handler

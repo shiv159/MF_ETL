@@ -12,6 +12,27 @@ timeout_config:
   enrichment_timeout: 300  # API enrichment timeout in seconds
   fetcher_timeout: 30      # Individual fetcher timeout in seconds
 
+# Retry configuration for resilience
+retry_config:
+  max_retries: 3           # Maximum number of retry attempts
+  initial_delay: 1         # Initial delay in seconds (exponential backoff)
+  max_delay: 10            # Maximum delay in seconds
+  backoff_multiplier: 2    # Exponential backoff multiplier
+  retry_on_timeout: true   # Retry on timeout errors
+  retry_on_server_error: true  # Retry on 5xx errors
+
+# Feature flags for optional functionality
+feature_flags:
+  caching:
+    enabled: true
+    ttl_minutes: 60  # Cache TTL in minutes (0 = no expiry)
+  correlation_id_tracking:
+    enabled: true
+  concurrent_enrichment:
+    enabled: true
+    max_concurrent: 5
+    timeout_per_fund: 300  # seconds
+
 # Data validation thresholds
 validation:
   nav:

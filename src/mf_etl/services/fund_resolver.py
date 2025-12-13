@@ -110,9 +110,9 @@ class FundResolver:
     def _get_all_schemes(self) -> Dict:
         """Get all schemes from mftool (cached)"""
         if self._scheme_cache is None:
-            self._log('info', 'Loading all mutual fund schemes...')
+            self._log('debug', 'Loading all mutual fund schemes...')
             self._scheme_cache = self.mftool.get_scheme_codes()
-            self._log('info', f'Loaded {len(self._scheme_cache)} schemes')
+            self._log('debug', f'Loaded {len(self._scheme_cache)} schemes')
         return self._scheme_cache
     
     def search_scheme_code(self, fund_name: str) -> Optional[str]:
@@ -320,14 +320,14 @@ class FundResolver:
         official_scheme_name = None
         
         if scheme_code:
-            self._log('info', f"Found scheme code {scheme_code} for '{fund_name}'")
+            self._log('debug', f"Found scheme code {scheme_code} for '{fund_name}'")
             # Get the official scheme name from mftool
             all_schemes = self._get_all_schemes()
             official_scheme_name = all_schemes.get(scheme_code)
             if official_scheme_name:
-                self._log('info', f"Official scheme name: {official_scheme_name}")
+                self._log('debug', f"Official scheme name: {official_scheme_name}")
         else:
-            self._log('warning', f"No scheme code found for '{fund_name}'")
+            self._log('debug', f"No scheme code found for '{fund_name}'")
         
         # Use official name for mstarpy if available, otherwise use input name
         primary_search_term = official_scheme_name or fund_name
@@ -361,7 +361,7 @@ class FundResolver:
             'mstarpy_alternate_terms': alternates
         }
         
-        self._log('info', f"Resolved '{fund_name}': scheme_code={scheme_code}, primary_term='{primary_search_term}', alternates={len(alternates)}")
+        self._log('debug', f"Resolved '{fund_name}': scheme_code={scheme_code}, primary_term='{primary_search_term}', alternates={len(alternates)}")
         return result
     
     def resolve_funds(self, fund_names: List[str]) -> List[Dict[str, Optional[str]]]:

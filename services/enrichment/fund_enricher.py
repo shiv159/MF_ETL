@@ -1,9 +1,12 @@
+import asyncio
 import logging
 import sys
+import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 
 from services.api.models.response_models import EnrichedFund
 
@@ -20,6 +23,14 @@ from src.mf_etl.utils.search_utils import (  # noqa: E402
     normalize_sector_result,
 )
 
+# Context variable for correlation ID (shared with API)
+correlation_id_var: ContextVar[str] = ContextVar('correlation_id', default=None)
+
+
+def get_correlation_id() -> str:
+    """Get current correlation ID from context."""
+    return correlation_id_var.get() or "no-id"
+
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +43,202 @@ class SchemeMatch:
 
 
 class FundEnricher:
-    def __init__(self, logger: Optional[logging.Logger] = None):
+    def __init__(self, logger: Optional[logging.Logger] = None, enable_caching: bool = True, cache_ttl_minutes: int = 60):
         self.logger = logger or logging.getLogger(__name__)
         self.fetcher = MFToolFetcher(self.logger)
         self.mstar_fetcher = MstarPyFetcher(self.logger)
         self.resolver = FundResolver(self.logger)
+        
+        # Caching configuration
+        self.caching_enabled = enable_caching
+        self.logger.info(f"Fund enrichment caching: {'enabled' if enable_caching else 'disabled'}")
+        
+        # Initialize cache for fund resolutions with configurable TTL
+        self._cache: Dict[str, Tuple[Optional[EnrichedFund], float]] = {}
+        self._cache_ttl_seconds = cache_ttl_minutes * 60  # Convert minutes to seconds
+        
+    def _normalize_fund_name(self, fund_name: str) -> str:
+        """Normalize fund name for cache key to handle duplicates."""
+        return fund_name.strip().lower()
+    
+    def _is_cache_valid(self, timestamp: float) -> bool:
+        """Check if cache entry is still valid based on TTL."""
+        if not self.caching_enabled:
+            return False
+        return (time.time() - timestamp) < self._cache_ttl_seconds
+    
+    def _clear_expired_cache(self) -> None:
+        """Remove expired entries from cache."""
+        if not self.caching_enabled:
+            return
+            
+        now = time.time()
+        expired_keys = [
+            key for key, (_, timestamp) in self._cache.items()
+            if (now - timestamp) >= self._cache_ttl_seconds
+        ]
+        for key in expired_keys:
+            del self._cache[key]
+        
+        if expired_keys:
+            self.logger.debug(f"Cache cleanup: removed {len(expired_keys)} expired entries")
+
+    async def enrich_async(self, fund_name: str) -> Optional[EnrichedFund]:
+        """
+        Async wrapper for enrich() method.
+        
+        Runs the synchronous enrich() method in a thread pool to avoid blocking
+        the event loop when making external API calls. Uses cache to avoid
+        redundant enrichment of duplicate fund names if caching is enabled.
+        
+        Args:
+            fund_name: Name of the fund to enrich
+            
+        Returns:
+            EnrichedFund object if enrichment successful, None otherwise
+        """
+        # Check cache first (only if caching enabled)
+        if self.caching_enabled:
+            cache_key = self._normalize_fund_name(fund_name)
+            if cache_key in self._cache:
+                cached_result, timestamp = self._cache[cache_key]
+                if self._is_cache_valid(timestamp):
+                    self.logger.debug(f"Cache hit for '{fund_name}'")
+                    return cached_result
+                else:
+                    # Remove expired entry
+                    del self._cache[cache_key]
+        
+        # Not in cache or caching disabled, run enrichment
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.enrich, fund_name)
+
+    @staticmethod
+    async def enrich_batch_concurrent(
+        enricher: 'FundEnricher',
+        fund_names: List[str],
+        max_concurrent: int = 5,
+        timeout_per_fund: int = 15
+    ) -> List[Optional[EnrichedFund]]:
+        """
+        Enrich multiple funds concurrently with semaphore to limit concurrent operations.
+        
+        This method processes multiple funds in parallel, improving throughput significantly.
+        A semaphore limits the number of concurrent operations to prevent resource exhaustion.
+        Deduplicates fund names to leverage cache hits on repeated funds in the same batch.
+        
+        Args:
+            enricher: FundEnricher instance to use
+            fund_names: List of fund names to enrich
+            max_concurrent: Maximum number of concurrent enrichments (default: 5)
+            timeout_per_fund: Timeout in seconds per fund (default: 15s)
+            
+        Returns:
+            List of EnrichedFund objects (None for failed enrichments), maintaining original order
+            
+        Example:
+            enricher = FundEnricher()
+            results = await FundEnricher.enrich_batch_concurrent(
+                enricher,
+                ["Fund A", "Fund B", "Fund C"],
+                max_concurrent=5
+            )
+        """
+        # Clean up expired cache entries periodically (only if caching enabled)
+        if enricher.caching_enabled:
+            enricher._clear_expired_cache()
+        
+        # Deduplicate fund names while preserving order mapping
+        unique_funds = []
+        fund_name_to_indices: Dict[str, List[int]] = {}
+        
+        for idx, fund_name in enumerate(fund_names):
+            normalized = enricher._normalize_fund_name(fund_name)
+            if normalized not in fund_name_to_indices:
+                unique_funds.append(fund_name)
+                fund_name_to_indices[normalized] = []
+            fund_name_to_indices[normalized].append(idx)
+        
+        if len(unique_funds) < len(fund_names):
+            enricher.logger.info(
+                f"Deduplicating {len(fund_names)} funds to {len(unique_funds)} unique funds "
+                f"({len(fund_names) - len(unique_funds)} duplicates cached)"
+            )
+        
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def enrich_with_semaphore(fund_name: str) -> Optional[EnrichedFund]:
+            """Enrich a single fund with semaphore protection, timeout, and retry logic."""
+            async with semaphore:
+                max_attempts = 3
+                base_delay = 0.5
+                max_delay = 5
+                backoff_multiplier = 2
+                
+                for attempt in range(max_attempts):
+                    try:
+                        result = await asyncio.wait_for(
+                            enricher.enrich_async(fund_name),
+                            timeout=timeout_per_fund
+                        )
+                        if attempt > 0:
+                            enricher.logger.info(
+                                f"Successfully enriched '{fund_name}' on retry attempt {attempt + 1}"
+                            )
+                        return result
+                    except asyncio.TimeoutError:
+                        if attempt < max_attempts - 1:
+                            # Calculate backoff delay
+                            delay = min(base_delay * (backoff_multiplier ** attempt), max_delay)
+                            enricher.logger.warning(
+                                f"Timeout enriching '{fund_name}' (exceeded {timeout_per_fund}s), "
+                                f"retry attempt {attempt + 1}/{max_attempts} in {delay:.1f}s"
+                            )
+                            await asyncio.sleep(delay)
+                        else:
+                            enricher.logger.warning(
+                                f"Timeout enriching '{fund_name}' (exceeded {timeout_per_fund}s) - "
+                                f"all {max_attempts} attempts failed"
+                            )
+                            return None
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        # Retry on transient errors (connection errors, server errors)
+                        is_transient = any(keyword in error_str for keyword in 
+                                          ['timeout', 'connection', '500', 'server error', 'temporarily'])
+                        
+                        if attempt < max_attempts - 1 and is_transient:
+                            delay = min(base_delay * (backoff_multiplier ** attempt), max_delay)
+                            enricher.logger.warning(
+                                f"Transient error enriching '{fund_name}', "
+                                f"retry attempt {attempt + 1}/{max_attempts} in {delay:.1f}s: {str(e)[:80]}"
+                            )
+                            await asyncio.sleep(delay)
+                        else:
+                            enricher.logger.warning(
+                                f"Failed enriching '{fund_name}': {str(e)}"
+                            )
+                            return None
+                
+                return None
+        
+        # Gather all concurrent tasks for unique funds
+        unique_results = await asyncio.gather(
+            *[enrich_with_semaphore(fund_name) for fund_name in unique_funds]
+        )
+        
+        # Map results back to original order, handling duplicates
+        results: List[Optional[EnrichedFund]] = [None] * len(fund_names)
+        unique_name_to_result = {enricher._normalize_fund_name(name): result 
+                                 for name, result in zip(unique_funds, unique_results)}
+        
+        for normalized_name, indices in fund_name_to_indices.items():
+            result = unique_name_to_result.get(normalized_name)
+            for idx in indices:
+                results[idx] = result
+        
+        return results
+
 
     # Score candidate schemes via fuzzy matching so resolver fallbacks still return something useful
     def _best_scheme(self, fund_name: str, candidates: List[Dict[str, str]]) -> Optional[SchemeMatch]:
@@ -128,6 +330,19 @@ class FundEnricher:
         return None
 
     def enrich(self, fund_name: str) -> Optional[EnrichedFund]:
+        # Check cache first (only if caching enabled)
+        if self.caching_enabled:
+            cache_key = self._normalize_fund_name(fund_name)
+            if cache_key in self._cache:
+                cached_result, timestamp = self._cache[cache_key]
+                if self._is_cache_valid(timestamp):
+                    self.logger.debug(f"Cache hit for '{fund_name}'")
+                    return cached_result
+                else:
+                    # Remove expired entry
+                    del self._cache[cache_key]
+        
+        # Perform enrichment
         resolved = self.resolver.resolve_fund(fund_name)
         scheme_code = resolved.get('mftool_scheme_code')
 
@@ -140,6 +355,10 @@ class FundEnricher:
 
         if not scheme_code:
             self.logger.warning("Skipping enrichment for %s, no scheme code", fund_name)
+            # Cache the failure too (only if caching enabled)
+            if self.caching_enabled:
+                cache_key = self._normalize_fund_name(fund_name)
+                self._cache[cache_key] = (None, time.time())
             return None
 
         nav_data = self.fetcher.get_scheme_nav(scheme_code)
@@ -183,7 +402,7 @@ class FundEnricher:
             scheme_name = resolved.get('mftool_scheme_name') or ''
             fallback_terms = self._generate_fallback_search_terms(fund_name, scheme_name)
             if fallback_terms:
-                self.logger.info(f"Primary search failed for holdings, trying {len(fallback_terms)} fallback terms for '{fund_name}'")
+                self.logger.debug(f"Primary search failed for holdings, trying {len(fallback_terms)} fallback terms for '{fund_name}'")
                 holdings_detail = self._fetch_holdings_from_mstar_terms(fallback_terms)
         
         if holdings_detail:
@@ -197,7 +416,7 @@ class FundEnricher:
             scheme_name = resolved.get('mftool_scheme_name') or ''
             fallback_terms = self._generate_fallback_search_terms(fund_name, scheme_name)
             if fallback_terms:
-                self.logger.info(f"Primary search failed for sectors, trying {len(fallback_terms)} fallback terms for '{fund_name}'")
+                self.logger.debug(f"Primary search failed for sectors, trying {len(fallback_terms)} fallback terms for '{fund_name}'")
                 sector_detail = self._fetch_sector_from_mstar_terms(fallback_terms)
         
         if sector_detail:
@@ -214,6 +433,12 @@ class FundEnricher:
             current_nav=self._safe_float(nav_data.get('nav')) if isinstance(nav_data, dict) else None,
             nav_as_of=nav_data.get('nav_date') or nav_data.get('as_of') if isinstance(nav_data, dict) else None,
         )
+
+        # Cache the result (only if caching enabled)
+        if self.caching_enabled:
+            cache_key = self._normalize_fund_name(fund_name)
+            self._cache[cache_key] = (enriched, time.time())
+            self.logger.debug(f"Cached enrichment result for '{fund_name}'")
 
         return enriched
 
