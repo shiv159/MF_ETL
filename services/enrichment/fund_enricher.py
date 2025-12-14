@@ -1,12 +1,10 @@
 import asyncio
 import logging
 import sys
-import time
 from contextvars import ContextVar
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any
 
 from services.api.models.response_models import EnrichedFund
 
@@ -14,13 +12,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.mf_etl.fetchers.mftool_fetcher import MFToolFetcher  # noqa: E402
+from src.mf_etl.fetchers.mftool_fetcher import MFAPIFetcher  # noqa: E402
 from src.mf_etl.fetchers.mstarpy_fetcher import MstarPyFetcher  # noqa: E402
-from src.mf_etl.services.fund_resolver import FundResolver  # noqa: E402
 from src.mf_etl.utils.search_utils import (  # noqa: E402
-    generate_fallback_search_terms,
     safe_float,
-    normalize_sector_result,
+    validate_isin,
 )
 
 # Context variable for correlation ID (shared with API)
@@ -43,53 +39,78 @@ class SchemeMatch:
 
 
 class FundEnricher:
-    def __init__(self, logger: Optional[logging.Logger] = None, enable_caching: bool = True, cache_ttl_minutes: int = 60):
+    """
+    Enriches mutual fund data using a simplified two-source approach:
+    
+    1. MFAPI.in (mfapi.in) - Primary source for:
+       - Fund name resolution via two-step API (search + RapidFuzz)
+       - NAV data (latest value and date)
+       - ISIN codes (isin_growth, isin_div_reinvestment)
+       - Fund metadata (AMC, category, scheme name)
+    
+    2. MstarPy - Secondary source for:
+       - Holdings data (via ISIN from MFAPI)
+       - Sector allocation (via ISIN from MFAPI)
+    
+    Flow:
+    1. Input: Fund name (e.g., "HDFC Mid Cap Fund")
+    2. MFAPI.search_and_get_fund(name, fuzzy_threshold=85)
+       - Returns: scheme_code, scheme_name, ISIN, NAV, metadata
+    3. MstarPy.get_fund_holdings(isin)
+       - Returns: Holdings list using ISIN
+    4. MstarPy.get_sector_allocation(isin)
+       - Returns: Sector breakdown using ISIN
+    5. Return: Complete EnrichedFund object
+    
+    Benefits over previous approach:
+    - Single source of truth (mfapi.in instead of mftool + ISIN cache)
+    - No dependency on outdated ISIN cache files
+    - RapidFuzz matching centralized in one place (MFAPIFetcher)
+    - Simpler flow: 2 API calls instead of 6+
+    - ISIN always fresh from API
+    """
+    
+    def __init__(
+        self, 
+        logger: Optional[logging.Logger] = None,
+        mfapi_config: Optional[Dict] = None,
+        retry_config: Optional[Dict] = None
+    ):
+        """
+        Initialize FundEnricher with MFAPI and MstarPy fetchers.
+        
+        Args:
+            logger: Logger instance
+            mfapi_config: Configuration for MFAPI (timeout, max_retries, fuzzy_threshold)
+            retry_config: Retry configuration for error handling
+        """
         self.logger = logger or logging.getLogger(__name__)
-        self.fetcher = MFToolFetcher(self.logger)
+        
+        # Initialize MFAPI fetcher (primary source for fund resolution and NAV)
+        mfapi_cfg = mfapi_config or {}
+        mfapi_timeout = mfapi_cfg.get('timeout', 10)
+        mfapi_max_retries = mfapi_cfg.get('max_retries', 3)
+        self.mfapi_fetcher = MFAPIFetcher(self.logger, timeout=mfapi_timeout, max_retries=mfapi_max_retries)
+        self.mfapi_fuzzy_threshold = mfapi_cfg.get('fuzzy_threshold', 85)
+        
+        # Initialize MstarPy fetcher (secondary source for holdings/sectors)
         self.mstar_fetcher = MstarPyFetcher(self.logger)
-        self.resolver = FundResolver(self.logger)
         
-        # Caching configuration
-        self.caching_enabled = enable_caching
-        self.logger.info(f"Fund enrichment caching: {'enabled' if enable_caching else 'disabled'}")
-        
-        # Initialize cache for fund resolutions with configurable TTL
-        self._cache: Dict[str, Tuple[Optional[EnrichedFund], float]] = {}
-        self._cache_ttl_seconds = cache_ttl_minutes * 60  # Convert minutes to seconds
-        
-    def _normalize_fund_name(self, fund_name: str) -> str:
-        """Normalize fund name for cache key to handle duplicates."""
-        return fund_name.strip().lower()
-    
-    def _is_cache_valid(self, timestamp: float) -> bool:
-        """Check if cache entry is still valid based on TTL."""
-        if not self.caching_enabled:
-            return False
-        return (time.time() - timestamp) < self._cache_ttl_seconds
-    
-    def _clear_expired_cache(self) -> None:
-        """Remove expired entries from cache."""
-        if not self.caching_enabled:
-            return
-            
-        now = time.time()
-        expired_keys = [
-            key for key, (_, timestamp) in self._cache.items()
-            if (now - timestamp) >= self._cache_ttl_seconds
-        ]
-        for key in expired_keys:
-            del self._cache[key]
-        
-        if expired_keys:
-            self.logger.debug(f"Cache cleanup: removed {len(expired_keys)} expired entries")
+        # Retry configuration
+        self.retry_config = retry_config or {}
+        self.max_retries = self.retry_config.get('max_retries', 3)
+        self.initial_retry_delay = self.retry_config.get('initial_delay', 1)
+        self.max_retry_delay = self.retry_config.get('max_delay', 10)
+        self.retry_backoff_multiplier = self.retry_config.get('backoff_multiplier', 2)
+        self.retry_on_timeout = self.retry_config.get('retry_on_timeout', True)
+        self.retry_on_server_error = self.retry_config.get('retry_on_server_error', True)
 
     async def enrich_async(self, fund_name: str) -> Optional[EnrichedFund]:
         """
         Async wrapper for enrich() method.
         
         Runs the synchronous enrich() method in a thread pool to avoid blocking
-        the event loop when making external API calls. Uses cache to avoid
-        redundant enrichment of duplicate fund names if caching is enabled.
+        the event loop when making external API calls.
         
         Args:
             fund_name: Name of the fund to enrich
@@ -97,19 +118,6 @@ class FundEnricher:
         Returns:
             EnrichedFund object if enrichment successful, None otherwise
         """
-        # Check cache first (only if caching enabled)
-        if self.caching_enabled:
-            cache_key = self._normalize_fund_name(fund_name)
-            if cache_key in self._cache:
-                cached_result, timestamp = self._cache[cache_key]
-                if self._is_cache_valid(timestamp):
-                    self.logger.debug(f"Cache hit for '{fund_name}'")
-                    return cached_result
-                else:
-                    # Remove expired entry
-                    del self._cache[cache_key]
-        
-        # Not in cache or caching disabled, run enrichment
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.enrich, fund_name)
 
@@ -117,21 +125,20 @@ class FundEnricher:
     async def enrich_batch_concurrent(
         enricher: 'FundEnricher',
         fund_names: List[str],
-        max_concurrent: int = 5,
-        timeout_per_fund: int = 15
+        max_concurrent: int,
+        timeout_per_fund: int
     ) -> List[Optional[EnrichedFund]]:
         """
         Enrich multiple funds concurrently with semaphore to limit concurrent operations.
         
         This method processes multiple funds in parallel, improving throughput significantly.
         A semaphore limits the number of concurrent operations to prevent resource exhaustion.
-        Deduplicates fund names to leverage cache hits on repeated funds in the same batch.
         
         Args:
             enricher: FundEnricher instance to use
             fund_names: List of fund names to enrich
-            max_concurrent: Maximum number of concurrent enrichments (default: 5)
-            timeout_per_fund: Timeout in seconds per fund (default: 15s)
+            max_concurrent: Maximum number of concurrent enrichments
+            timeout_per_fund: Timeout in seconds per fund
             
         Returns:
             List of EnrichedFund objects (None for failed enrichments), maintaining original order
@@ -141,41 +148,16 @@ class FundEnricher:
             results = await FundEnricher.enrich_batch_concurrent(
                 enricher,
                 ["Fund A", "Fund B", "Fund C"],
-                max_concurrent=5
+                max_concurrent=5,
+                timeout_per_fund=15
             )
         """
-        # Clean up expired cache entries periodically (only if caching enabled)
-        if enricher.caching_enabled:
-            enricher._clear_expired_cache()
-        
-        # Deduplicate fund names while preserving order mapping
-        unique_funds = []
-        fund_name_to_indices: Dict[str, List[int]] = {}
-        
-        for idx, fund_name in enumerate(fund_names):
-            normalized = enricher._normalize_fund_name(fund_name)
-            if normalized not in fund_name_to_indices:
-                unique_funds.append(fund_name)
-                fund_name_to_indices[normalized] = []
-            fund_name_to_indices[normalized].append(idx)
-        
-        if len(unique_funds) < len(fund_names):
-            enricher.logger.info(
-                f"Deduplicating {len(fund_names)} funds to {len(unique_funds)} unique funds "
-                f"({len(fund_names) - len(unique_funds)} duplicates cached)"
-            )
-        
         semaphore = asyncio.Semaphore(max_concurrent)
         
         async def enrich_with_semaphore(fund_name: str) -> Optional[EnrichedFund]:
             """Enrich a single fund with semaphore protection, timeout, and retry logic."""
             async with semaphore:
-                max_attempts = 3
-                base_delay = 0.5
-                max_delay = 5
-                backoff_multiplier = 2
-                
-                for attempt in range(max_attempts):
+                for attempt in range(enricher.max_retries):
                     try:
                         result = await asyncio.wait_for(
                             enricher.enrich_async(fund_name),
@@ -187,18 +169,20 @@ class FundEnricher:
                             )
                         return result
                     except asyncio.TimeoutError:
-                        if attempt < max_attempts - 1:
-                            # Calculate backoff delay
-                            delay = min(base_delay * (backoff_multiplier ** attempt), max_delay)
+                        if attempt < enricher.max_retries - 1 and enricher.retry_on_timeout:
+                            delay = min(
+                                enricher.initial_retry_delay * (enricher.retry_backoff_multiplier ** attempt),
+                                enricher.max_retry_delay
+                            )
                             enricher.logger.warning(
                                 f"Timeout enriching '{fund_name}' (exceeded {timeout_per_fund}s), "
-                                f"retry attempt {attempt + 1}/{max_attempts} in {delay:.1f}s"
+                                f"retry attempt {attempt + 1}/{enricher.max_retries} in {delay:.1f}s"
                             )
                             await asyncio.sleep(delay)
                         else:
                             enricher.logger.warning(
                                 f"Timeout enriching '{fund_name}' (exceeded {timeout_per_fund}s) - "
-                                f"all {max_attempts} attempts failed"
+                                f"all {enricher.max_retries} attempts failed"
                             )
                             return None
                     except Exception as e:
@@ -207,262 +191,173 @@ class FundEnricher:
                         is_transient = any(keyword in error_str for keyword in 
                                           ['timeout', 'connection', '500', 'server error', 'temporarily'])
                         
-                        if attempt < max_attempts - 1 and is_transient:
-                            delay = min(base_delay * (backoff_multiplier ** attempt), max_delay)
+                        if attempt < enricher.max_retries - 1 and is_transient and enricher.retry_on_server_error:
+                            delay = min(
+                                enricher.initial_retry_delay * (enricher.retry_backoff_multiplier ** attempt),
+                                enricher.max_retry_delay
+                            )
                             enricher.logger.warning(
                                 f"Transient error enriching '{fund_name}', "
-                                f"retry attempt {attempt + 1}/{max_attempts} in {delay:.1f}s: {str(e)[:80]}"
+                                f"retry attempt {attempt + 1}/{enricher.max_retries} in {delay:.1f}s: {str(e)[:80]}"
                             )
                             await asyncio.sleep(delay)
                         else:
-                            enricher.logger.warning(
+                            enricher.logger.error(
                                 f"Failed enriching '{fund_name}': {str(e)}"
                             )
                             return None
                 
                 return None
         
-        # Gather all concurrent tasks for unique funds
-        unique_results = await asyncio.gather(
-            *[enrich_with_semaphore(fund_name) for fund_name in unique_funds]
+        # Process all funds concurrently
+        results = await asyncio.gather(
+            *[enrich_with_semaphore(fund_name) for fund_name in fund_names]
         )
-        
-        # Map results back to original order, handling duplicates
-        results: List[Optional[EnrichedFund]] = [None] * len(fund_names)
-        unique_name_to_result = {enricher._normalize_fund_name(name): result 
-                                 for name, result in zip(unique_funds, unique_results)}
-        
-        for normalized_name, indices in fund_name_to_indices.items():
-            result = unique_name_to_result.get(normalized_name)
-            for idx in indices:
-                results[idx] = result
         
         return results
 
-
-    # Score candidate schemes via fuzzy matching so resolver fallbacks still return something useful
-    def _best_scheme(self, fund_name: str, candidates: List[Dict[str, str]]) -> Optional[SchemeMatch]:
-        best: Optional[SchemeMatch] = None
-        for scheme in candidates:
-            ratio = SequenceMatcher(None, fund_name.lower(), scheme['name'].lower()).ratio()
-            if not best or ratio > best.score:
-                best = SchemeMatch(code=scheme['code'], name=scheme['name'], score=ratio)
-        return best
-
-    # Normalize numeric strings to floats, using shared utility
-    def _safe_float(self, value: Optional[str]) -> Optional[float]:
-        result = safe_float(value, default=None)
-        return result
-
-    def _normalize_sector_result(self, sector_result: Any) -> Optional[Dict[str, float]]:
-        if not sector_result:
-            return None
-
-        sector_data: Dict[str, float] = {}
-        if isinstance(sector_result, dict):
-            equity = sector_result.get('EQUITY')
-            if isinstance(equity, dict):
-                portfolio = equity.get('fundPortfolio')
-                if isinstance(portfolio, dict):
-                    for sector_name, percentage in portfolio.items():
-                        if sector_name == 'portfolioDate' or percentage is None:
-                            continue
-                        amount = self._safe_float(percentage)
-                        if amount is not None:
-                            sector_data[sector_name] = amount
-                    if sector_data:
-                        return sector_data
-            for sector_name, value in sector_result.items():
-                if isinstance(value, (dict, list)):
-                    continue
-                amount = self._safe_float(value)
-                if amount is not None:
-                    sector_data[sector_name] = amount
-            if sector_data:
-                return sector_data
-        elif isinstance(sector_result, list):
-            for item in sector_result:
-                if not isinstance(item, dict):
-                    continue
-                sector_name = item.get('assetType') or item.get('sectorName')
-                percentage = item.get('percentage') or item.get('value') or item.get('sectorValue')
-                amount = self._safe_float(percentage)
-                if sector_name and amount is not None:
-                    sector_data[sector_name] = amount
-            if sector_data:
-                return sector_data
-        elif hasattr(sector_result, 'empty') and not sector_result.empty:
-            if 'sectorValue' in sector_result.columns and 'sectorName' in sector_result.columns:
-                for _, row in sector_result.iterrows():
-                    sector_name = row.get('sectorName')
-                    amount = self._safe_float(row.get('sectorValue'))
-                    if sector_name and amount is not None:
-                        sector_data[sector_name] = amount
-                if sector_data:
-                    return sector_data
-
-        self.logger.debug("Unable to normalize sector data from %s", type(sector_result))
-        return None
-
-    def _fetch_isin_from_mstarpy(self, fund_name: str, search_terms: List[str]) -> Optional[str]:
+    def enrich(self, fund_name: str) -> Optional[EnrichedFund]:
         """
-        Try to get ISIN directly from mstarpy by searching for the fund
+        Enrich a single mutual fund with complete data.
+        
+        Three-phase approach:
+        
+        Phase 1: Fund Resolution via MFAPI (2 API calls)
+            - GET /mf/search?q={fund_name} → list of matching funds
+            - RapidFuzz token_set_ratio matching (threshold: 85%)
+            - GET /mf/{scheme_code}/latest → NAV + ISIN + metadata
+        
+        Phase 2: Fetch Holdings via MstarPy (using ISIN)
+            - Extract ISIN from MFAPI response
+            - GET holdings using ISIN (ISIN-based lookup is faster and more accurate)
+        
+        Phase 3: Fetch Sectors via MstarPy (using ISIN)
+            - Get sector allocation using same ISIN
         
         Args:
-            fund_name: Original fund name for logging
-            search_terms: List of search terms to try (primary + alternates)
-        
+            fund_name: Name of the fund to enrich (e.g., "HDFC Mid Cap Fund")
+            
         Returns:
-            ISIN if found, None otherwise
+            EnrichedFund object with complete data if successful, None on failure
+            
+        Example:
+            enricher = FundEnricher()
+            fund = enricher.enrich("HDFC Top 100")
+            if fund:
+                print(f"NAV: {fund.current_nav}, ISIN: {fund.isin}")
         """
-        for term in search_terms:
-            if not term:
-                continue
-            try:
-                self.logger.debug(f"Attempting to fetch ISIN from mstarpy using term: {term}")
-                fund = self.mstar_fetcher.get_fund(term)
-                if fund and hasattr(fund, 'isin') and fund.isin:
-                    self.logger.info(f"Found ISIN '{fund.isin}' for '{fund_name}' using term '{term}'")
-                    return fund.isin
-            except Exception as e:
-                self.logger.debug(f"ISIN lookup failed for term '{term}': {str(e)}")
-                continue
-        return None
-
-    def enrich(self, fund_name: str) -> Optional[EnrichedFund]:
-        # Check cache first (only if caching enabled)
-        if self.caching_enabled:
-            cache_key = self._normalize_fund_name(fund_name)
-            if cache_key in self._cache:
-                cached_result, timestamp = self._cache[cache_key]
-                if self._is_cache_valid(timestamp):
-                    self.logger.debug(f"Cache hit for '{fund_name}'")
-                    return cached_result
-                else:
-                    # Remove expired entry
-                    del self._cache[cache_key]
+        # ===== PHASE 1: Fund Resolution via MFAPI =====
+        # Two-step API call with RapidFuzz matching
+        self.logger.info(f"[ENRICH-PHASE1] Resolving fund: '{fund_name}'")
         
-        # Perform enrichment
-        resolved = self.resolver.resolve_fund(fund_name)
-        scheme_code = resolved.get('mftool_scheme_code')
-
-        if not scheme_code:
-            candidates = self.fetcher.search_scheme(fund_name)
-            best = self._best_scheme(fund_name, candidates)
-            if best and best.score >= 0.35:
-                scheme_code = best.code
-                self.logger.info("Selected fuzzy match %s for %s (score %.2f)", best.name, fund_name, best.score)
-
-        if not scheme_code:
-            self.logger.warning("Skipping enrichment for %s, no scheme code", fund_name)
-            # Cache the failure too (only if caching enabled)
-            if self.caching_enabled:
-                cache_key = self._normalize_fund_name(fund_name)
-                self._cache[cache_key] = (None, time.time())
+        mfapi_result = self.mfapi_fetcher.search_and_get_fund(
+            fund_name,
+            fuzzy_threshold=self.mfapi_fuzzy_threshold
+        )
+        
+        if not mfapi_result:
+            self.logger.warning(f"[ENRICH-PHASE1] ✗ Failed to resolve fund: '{fund_name}'")
             return None
-
-        nav_data = self.fetcher.get_scheme_nav(scheme_code)
-        details = self.fetcher.get_scheme_details(scheme_code)
-
-        sector_allocation = details.get('sector_allocation') or details.get('sectorBreakup')
-        top_holdings = details.get('top_holdings') or details.get('top_holdings_data')
-
-        # Build search terms early for ISIN lookup
-        search_terms = self._get_mstar_search_terms(resolved)
         
-        # Prefer any available ISIN so we can enrich via Morningstar
-        isin_candidates = [
-            details.get('isin'),
-            nav_data.get('isin') if isinstance(nav_data, dict) else None,
-            details.get('fund_isin'),
-            details.get('isin_code'),
-        ]
-        fund_isin = next((value for value in isin_candidates if value), None)
+        if mfapi_result.get("status") != "SUCCESS":
+            self.logger.warning(
+                f"[ENRICH-PHASE1] ✗ MFAPI returned non-success status: {mfapi_result.get('status')}"
+            )
+            return None
         
-        # If no ISIN found in mftool, try to fetch from mstarpy directly
-        if not fund_isin and search_terms:
-            fund_isin = self._fetch_isin_from_mstarpy(fund_name, search_terms)
+        self.logger.info(
+            f"[ENRICH-PHASE1] ✓ Fund resolved: '{mfapi_result.get('scheme_name')}' "
+            f"(ISIN: {mfapi_result.get('isin_growth')}, NAV: {mfapi_result.get('nav')})"
+        )
         
-        # Fallback to scheme_code if still no ISIN
-        if not fund_isin:
-            fund_isin = scheme_code
+        # Extract key data from MFAPI response
+        fund_isin = mfapi_result.get('isin_growth')
+        scheme_name = mfapi_result.get('scheme_name')
+        amc = mfapi_result.get('fund_house')
+        category = mfapi_result.get('scheme_category')
+        nav = mfapi_result.get('nav')
+        nav_date = mfapi_result.get('nav_date')
         
-        holdings_detail = None
-        sector_detail = None
-
-        if fund_isin:
-            holdings_detail = self._fetch_holdings_from_mstar(fund_isin)
-            sector_detail = self._fetch_sector_from_mstar(fund_isin)
-
-        if not holdings_detail and search_terms:
-            holdings_detail = self._fetch_holdings_from_mstar_terms(search_terms)
+        # ===== PHASE 2: Fetch Holdings via MstarPy =====
+        holdings = None
+        if fund_isin and validate_isin(fund_isin):
+            self.logger.debug(
+                f"[ENRICH-PHASE2] Fetching holdings using ISIN: {fund_isin}"
+            )
+            holdings = self._fetch_holdings_from_mstar(fund_isin)
+            if holdings:
+                self.logger.info(
+                    f"[ENRICH-PHASE2] ✓ Fetched {len(holdings)} holdings for ISIN {fund_isin}"
+                )
+            else:
+                self.logger.debug(
+                    f"[ENRICH-PHASE2] ✗ No holdings data for ISIN {fund_isin}"
+                )
+        else:
+            self.logger.warning(
+                f"[ENRICH-PHASE2] ✗ Invalid or missing ISIN: {fund_isin}"
+            )
         
-        # If primary search terms failed, try fallback search terms
-        if not holdings_detail:
-            scheme_name = resolved.get('mftool_scheme_name') or ''
-            fallback_terms = self._generate_fallback_search_terms(fund_name, scheme_name)
-            if fallback_terms:
-                self.logger.debug(f"Primary search failed for holdings, trying {len(fallback_terms)} fallback terms for '{fund_name}'")
-                holdings_detail = self._fetch_holdings_from_mstar_terms(fallback_terms)
+        # ===== PHASE 3: Fetch Sectors via MstarPy =====
+        sectors = None
+        if fund_isin and validate_isin(fund_isin):
+            self.logger.debug(
+                f"[ENRICH-PHASE3] Fetching sector allocation using ISIN: {fund_isin}"
+            )
+            sectors = self._fetch_sector_from_mstar(fund_isin)
+            if sectors:
+                self.logger.info(
+                    f"[ENRICH-PHASE3] ✓ Fetched {len(sectors)} sectors for ISIN {fund_isin}"
+                )
+            else:
+                self.logger.debug(
+                    f"[ENRICH-PHASE3] ✗ No sector data for ISIN {fund_isin}"
+                )
         
-        if holdings_detail:
-            top_holdings = holdings_detail
-
-        if not sector_detail and search_terms:
-            sector_detail = self._fetch_sector_from_mstar_terms(search_terms)
-        
-        # If primary search terms failed, try fallback search terms
-        if not sector_detail:
-            scheme_name = resolved.get('mftool_scheme_name') or ''
-            fallback_terms = self._generate_fallback_search_terms(fund_name, scheme_name)
-            if fallback_terms:
-                self.logger.debug(f"Primary search failed for sectors, trying {len(fallback_terms)} fallback terms for '{fund_name}'")
-                sector_detail = self._fetch_sector_from_mstar_terms(fallback_terms)
-        
-        if sector_detail:
-            sector_allocation = sector_detail
-
+        # ===== Create EnrichedFund object =====
         enriched = EnrichedFund(
             fund_name=fund_name,
-            isin=fund_isin or (details.get('isin') or (nav_data.get('isin') if isinstance(nav_data, dict) else None)),
-            amc=details.get('fund_house') or details.get('amc_name'),
-            category=details.get('fund_category'),
-            expense_ratio=self._safe_float(details.get('expense_ratio')),
-            sector_allocation=sector_allocation,
-            top_holdings=top_holdings,
-            current_nav=self._safe_float(nav_data.get('nav')) if isinstance(nav_data, dict) else None,
-            nav_as_of=nav_data.get('nav_date') or nav_data.get('as_of') if isinstance(nav_data, dict) else None,
+            isin=fund_isin,
+            amc=amc,
+            category=category,
+            expense_ratio=None,  # Not available from MFAPI
+            sector_allocation=sectors,
+            top_holdings=holdings,
+            current_nav=nav,
+            nav_as_of=nav_date,
         )
-
-        # Cache the result (only if caching enabled)
-        if self.caching_enabled:
-            cache_key = self._normalize_fund_name(fund_name)
-            self._cache[cache_key] = (enriched, time.time())
-            self.logger.debug(f"Cached enrichment result for '{fund_name}'")
-
+        
+        self.logger.info(
+            f"[ENRICH] ✓ Enrichment complete for '{fund_name}': "
+            f"NAV={nav}, Sectors={len(sectors) if sectors else 0}, "
+            f"Holdings={len(holdings) if holdings else 0}"
+        )
+        
         return enriched
 
     def _fetch_holdings_from_mstar(self, fund_isin: str) -> Optional[List[Dict[str, Any]]]:
-        holdings_df = self.mstar_fetcher.get_fund_holdings(fund_isin)
-        if holdings_df is None:
-            return None
+        """
+        Fetch holdings data from MstarPy using ISIN.
+        
+        Args:
+            fund_isin: ISIN code from MFAPI
+            
+        Returns:
+            List of holdings, or None if fetch failed
+        """
         try:
+            holdings_df = self.mstar_fetcher.get_fund_holdings(fund_isin)
+            if holdings_df is None:
+                return None
+            
             records = holdings_df.to_dict('records')
             return [self._filter_top_holding(record) for record in records]
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"Failed to fetch holdings for ISIN {fund_isin}: {str(e)}")
             return None
 
-    def _fetch_holdings_from_mstar_terms(self, search_terms: List[str]) -> Optional[List[Dict[str, Any]]]:
-        for term in search_terms:
-            if not term:
-                continue
-            holdings = self._fetch_holdings_from_mstar(term)
-            if holdings:
-                self.logger.debug("Matched Morningstar holdings using term '%s'", term)
-                return holdings
-        return None
-
     def _filter_top_holding(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter holding record to allowed fields."""
         allowed = [
             'securityName',
             'isin',
@@ -488,33 +383,87 @@ class FundEnricher:
         return {key: record.get(key) for key in allowed if key in record}
 
     def _fetch_sector_from_mstar(self, fund_isin: str) -> Optional[Dict[str, float]]:
-        sectors = self.mstar_fetcher.get_sector_allocation(fund_isin)
-        normalized = self._normalize_sector_result(sectors)
-        return normalized
+        """
+        Fetch sector allocation from MstarPy using ISIN.
+        
+        Args:
+            fund_isin: ISIN code from MFAPI
+            
+        Returns:
+            Dict of sector_name -> percentage, or None if fetch failed
+        """
+        try:
+            sectors = self.mstar_fetcher.get_sector_allocation(fund_isin)
+            normalized = self._normalize_sector_result(sectors)
+            return normalized
+        except Exception as e:
+            self.logger.debug(f"Failed to fetch sectors for ISIN {fund_isin}: {str(e)}")
+            return None
 
-    def _fetch_sector_from_mstar_terms(self, search_terms: List[str]) -> Optional[Dict[str, float]]:
-        for term in search_terms:
-            if not term:
-                continue
-            sectors = self._fetch_sector_from_mstar(term)
-            if sectors:
-                self.logger.debug("Matched Morningstar sectors using term '%s'", term)
-                return sectors
+    def _normalize_sector_result(self, sector_result: Any) -> Optional[Dict[str, float]]:
+        """Normalize sector data from various MstarPy response formats."""
+        if not sector_result:
+            return None
+
+        sector_data: Dict[str, float] = {}
+        
+        if isinstance(sector_result, dict):
+            equity = sector_result.get('EQUITY')
+            if isinstance(equity, dict):
+                portfolio = equity.get('fundPortfolio')
+                if isinstance(portfolio, dict):
+                    for sector_name, percentage in portfolio.items():
+                        if sector_name == 'portfolioDate' or percentage is None:
+                            continue
+                        amount = safe_float(percentage)
+                        if amount is not None:
+                            sector_data[sector_name] = amount
+                    if sector_data:
+                        return sector_data
+            
+            # Flat dict format
+            for sector_name, value in sector_result.items():
+                if isinstance(value, (dict, list)):
+                    continue
+                amount = safe_float(value)
+                if amount is not None:
+                    sector_data[sector_name] = amount
+            if sector_data:
+                return sector_data
+        
+        elif isinstance(sector_result, list):
+            # List of dicts format
+            for item in sector_result:
+                if not isinstance(item, dict):
+                    continue
+                sector_name = item.get('assetType') or item.get('sectorName')
+                percentage = item.get('percentage') or item.get('value') or item.get('sectorValue')
+                amount = safe_float(percentage)
+                if sector_name and amount is not None:
+                    sector_data[sector_name] = amount
+            if sector_data:
+                return sector_data
+        
+        elif hasattr(sector_result, 'empty') and not sector_result.empty:
+            # DataFrame format
+            if 'sectorValue' in sector_result.columns and 'sectorName' in sector_result.columns:
+                for _, row in sector_result.iterrows():
+                    sector_name = row.get('sectorName')
+                    amount = safe_float(row.get('sectorValue'))
+                    if sector_name and amount is not None:
+                        sector_data[sector_name] = amount
+                if sector_data:
+                    return sector_data
+
+        self.logger.debug(f"Unable to normalize sector data from {type(sector_result)}")
         return None
 
-    def _get_mstar_search_terms(self, resolved: Dict[str, Optional[str]]) -> List[str]:
-        terms: List[str] = []
-        primary = resolved.get('mstarpy_search_term')
-        if primary:
-            terms.append(primary)
-        for alt in resolved.get('mstarpy_alternate_terms', []) or []:
-            if alt and alt not in terms:
-                terms.append(alt)
-        return terms
+    def close(self):
+        """Close all fetcher connections."""
+        if hasattr(self, 'mfapi_fetcher') and self.mfapi_fetcher:
+            self.mfapi_fetcher.close()
+    
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.close()
 
-    def _generate_fallback_search_terms(self, fund_name: str, scheme_name: str) -> List[str]:
-        """
-        Generate additional search terms when primary resolution fails in mstarpy.
-        Uses shared utility function to ensure consistency with demo and other modules.
-        """
-        return generate_fallback_search_terms(fund_name, scheme_name)

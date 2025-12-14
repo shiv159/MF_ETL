@@ -1,125 +1,330 @@
-"""Fetcher for mutual fund data using mftool"""
+"""Fetcher for mutual fund data using mfapi.in (free open API)
 
-from typing import Dict, Any, Optional, List
-from datetime import datetime
+This module provides access to Indian mutual fund data via mfapi.in:
+- NAV data and history
+- ISIN codes (isin_growth, isin_div_reinvestment)
+- Fund metadata (AMC, category, scheme name)
+- No authentication required
+- Free and open API
+
+API Docs: https://www.mfapi.in/docs/
+
+Two-step enrichment flow:
+1. search_schemes(query) → Get list of funds with scheme codes
+2. search_and_get_fund(name, threshold) → RapidFuzz match + fetch latest NAV
+"""
+
+from typing import Dict, Any, Optional, List, Tuple
 import logging
-from mftool import Mftool
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from rapidfuzz import fuzz, process
 
 
-class MFToolFetcher:
-    """Fetch mutual fund data using mftool library"""
+class MFAPIFetcher:
+    """Fetch mutual fund data using mfapi.in API"""
     
-    def __init__(self, logger: Optional[logging.Logger] = None):
+    BASE_URL = "https://api.mfapi.in"
+    TIMEOUT = 10
+    MAX_RETRIES = 3
+    
+    def __init__(self, logger: Optional[logging.Logger] = None, timeout: int = 10, max_retries: int = 3):
         """
-        Initialize MFToolFetcher.
+        Initialize MFAPIFetcher with resilient HTTP session.
         
         Args:
             logger: Logger instance for logging operations
+            timeout: API request timeout in seconds (default: 10)
+            max_retries: Maximum retry attempts for failed requests (default: 3)
         """
-        self.mf = Mftool()
         self.logger = logger or logging.getLogger(__name__)
+        self.TIMEOUT = timeout
+        self.MAX_RETRIES = max_retries
+        self.session = self._create_session()
     
-    def get_scheme_nav(self, scheme_code: str) -> Dict[str, Any]:
+    def _create_session(self) -> requests.Session:
         """
-        Fetch NAV data for a specific mutual fund scheme.
+        Create HTTP session with automatic retries for transient failures.
+        
+        Returns:
+            Configured requests.Session with retry strategy
+        """
+        session = requests.Session()
+        
+        retry_strategy = Retry(
+            total=self.MAX_RETRIES,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"]
+        )
+        
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        self.logger.debug(f"HTTP session created with {self.MAX_RETRIES} retries, {self.TIMEOUT}s timeout")
+        return session
+    
+    def search_schemes(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Search for mutual fund schemes by name/AMC using mfapi.in search API.
+        
+        Example:
+            GET https://api.mfapi.in/mf/search?q=HDFC
+            Returns list of all HDFC schemes with schemeCode and schemeName
         
         Args:
-            scheme_code: Mutual fund scheme code
+            query: Search query (e.g., "HDFC", "Mid Cap", "Axis")
             
         Returns:
-            Dictionary containing NAV data
+            List of schemes, each with keys:
+                - schemeCode: int (e.g., 125497)
+                - schemeName: str (e.g., "HDFC Top 100 Fund - Direct Plan - Growth")
         """
         try:
-            self.logger.info(f"Fetching NAV data for scheme code: {scheme_code}")
-            nav_data = self.mf.get_scheme_quote(scheme_code)
+            url = f"{self.BASE_URL}/mf/search"
+            params = {"q": query}
             
-            if not nav_data:
-                self.logger.warning(f"No data returned for scheme code: {scheme_code}")
-                return {}
+            self.logger.debug(f"[MFAPI-SEARCH] Searching: {query}")
             
-            self.logger.info(f"Successfully fetched NAV data for {scheme_code}")
-            return nav_data
+            response = self.session.get(url, params=params, timeout=self.TIMEOUT)
+            response.raise_for_status()
             
-        except Exception as e:
-            self.logger.error(f"Error fetching NAV data for {scheme_code}: {str(e)}")
-            return {}
-    
-    def get_scheme_details(self, scheme_code: str) -> Dict[str, Any]:
-        """
-        Fetch detailed information about a mutual fund scheme.
-        
-        Args:
-            scheme_code: Mutual fund scheme code
+            schemes = response.json()
             
-        Returns:
-            Dictionary containing scheme details
-        """
-        try:
-            self.logger.info(f"Fetching scheme details for: {scheme_code}")
-            details = self.mf.get_scheme_details(scheme_code)
-            
-            if not details:
-                self.logger.warning(f"No details found for scheme code: {scheme_code}")
-                return {}
-            
-            self.logger.info(f"Successfully fetched details for {scheme_code}")
-            return details
-            
-        except Exception as e:
-            self.logger.error(f"Error fetching scheme details for {scheme_code}: {str(e)}")
-            return {}
-    
-    def get_all_schemes(self) -> List[Dict[str, Any]]:
-        """
-        Fetch list of all available mutual fund schemes.
-        
-        Returns:
-            List of scheme dictionaries
-        """
-        try:
-            self.logger.info("Fetching all available schemes")
-            schemes = self.mf.get_scheme_codes()
-            
-            if not schemes:
-                self.logger.warning("No schemes data returned")
+            if not isinstance(schemes, list):
+                self.logger.warning(f"[MFAPI-SEARCH] Unexpected response format for query '{query}'")
                 return []
             
-            # Convert to list of dicts
-            scheme_list = [
-                {"code": code, "name": name} 
-                for code, name in schemes.items()
-            ]
+            self.logger.info(f"[MFAPI-SEARCH] ✓ Found {len(schemes)} schemes for '{query}'")
+            return schemes
             
-            self.logger.info(f"Successfully fetched {len(scheme_list)} schemes")
-            return scheme_list
-            
+        except requests.exceptions.Timeout:
+            self.logger.error(f"[MFAPI-SEARCH] Timeout searching for '{query}'")
+            return []
+        except requests.exceptions.ConnectionError:
+            self.logger.error(f"[MFAPI-SEARCH] Connection error searching for '{query}'")
+            return []
         except Exception as e:
-            self.logger.error(f"Error fetching all schemes: {str(e)}")
+            self.logger.error(f"[MFAPI-SEARCH] Error searching for '{query}': {str(e)}")
             return []
     
-    def search_scheme(self, search_term: str) -> List[Dict[str, Any]]:
+    def search_and_get_fund(
+        self, 
+        input_fund_name: str, 
+        fuzzy_threshold: int = 85
+    ) -> Optional[Dict[str, Any]]:
         """
-        Search for schemes by name.
+        Two-step process to resolve fund and get NAV + ISIN:
+        
+        Step 1: Search for funds matching input name
+        Step 2: Use RapidFuzz to find best match among results
+        Step 3: Fetch latest NAV + ISIN for selected fund
+        
+        This is the primary method for enrichment.
+        
+        Example Flow:
+            Input: "HDFC Mid Cap"
+            Search API returns: [{schemeCode: 125499, schemeName: "HDFC Mid Cap Fund - Direct Plan - Growth"}, ...]
+            RapidFuzz: "HDFC Mid Cap Fund - Direct Plan - Growth" scores 95% → Selected
+            Latest NAV API returns: {isin_growth: "INF179K01AB9", nav: "1485.50", ...}
         
         Args:
-            search_term: Search term for scheme name
+            input_fund_name: User-provided fund name (e.g., "HDFC Mid Cap Fund")
+            fuzzy_threshold: RapidFuzz token_set_ratio threshold (0-100), default 85
             
         Returns:
-            List of matching schemes
+            Dict with keys:
+                - scheme_code: Scheme code
+                - scheme_name: Full official scheme name from MFAPI
+                - fund_house: AMC/Fund House name
+                - scheme_category: Fund category (e.g., "Equity - Mid Cap")
+                - scheme_type: Open/Closed ended
+                - isin_growth: ISIN for growth option
+                - isin_div_reinvestment: ISIN for dividend reinvestment (if available)
+                - nav: Latest NAV value
+                - nav_date: NAV date (format: DD-MM-YYYY)
+                - matched_fund_name: Name that matched via RapidFuzz
+                - fuzzy_score: RapidFuzz match score (0-100)
+                - status: "SUCCESS" or "FAILED"
+            
+            Returns None if no match found above fuzzy_threshold
+        """
+        # STEP 1: Search API
+        self.logger.debug(f"[MFAPI-RESOLVE] Step 1: Searching for '{input_fund_name}'")
+        search_results = self.search_schemes(input_fund_name)
+        
+        if not search_results:
+            self.logger.warning(f"[MFAPI-RESOLVE] - No search results for '{input_fund_name}'")
+            return None
+        
+        self.logger.debug(f"[MFAPI-RESOLVE] Found {len(search_results)} candidates")
+        
+        # STEP 2: RapidFuzz matching
+        self.logger.debug(f"[MFAPI-RESOLVE] Step 2: RapidFuzz matching (threshold: {fuzzy_threshold}%)")
+        scheme_names = [r.get('schemeName') for r in search_results]
+        
+        best_match = self._fuzzy_best_match(
+            input_fund_name,
+            scheme_names,
+            threshold=fuzzy_threshold
+        )
+        
+        if not best_match:
+            self.logger.warning(
+                f"[MFAPI-RESOLVE] ✗ No RapidFuzz match above {fuzzy_threshold}% for '{input_fund_name}'"
+            )
+            return None
+        
+        matched_name, score, matched_index = best_match
+        selected_fund = search_results[matched_index]
+        scheme_code = selected_fund.get('schemeCode')
+        
+        self.logger.info(
+            f"[MFAPI-RESOLVE] ✓ RapidFuzz match: '{matched_name}' "
+            f"(score: {score}%, scheme_code: {scheme_code})"
+        )
+        
+        # STEP 3: Get latest NAV + ISIN
+        self.logger.debug(f"[MFAPI-RESOLVE] Step 3: Fetching latest NAV for scheme {scheme_code}")
+        nav_data = self._get_latest_nav_internal(scheme_code)
+        
+        if not nav_data:
+            self.logger.error(f"[MFAPI-RESOLVE] ✗ Failed to fetch NAV for scheme {scheme_code}")
+            return None
+        
+        # Combine search result + NAV data
+        result = {
+            "input_fund_name": input_fund_name,
+            "matched_fund_name": matched_name,
+            "fuzzy_score": score,
+            **nav_data  # Includes: scheme_code, scheme_name, fund_house, isin_growth, nav, nav_date, status
+        }
+        
+        self.logger.info(
+            f"[MFAPI-RESOLVE] ✓ Fund resolved: {matched_name} | "
+            f"ISIN: {nav_data.get('isin_growth')} | "
+            f"NAV: {nav_data.get('nav')} ({nav_data.get('nav_date')})"
+        )
+        
+        return result
+    
+    def _get_latest_nav_internal(self, scheme_code: str) -> Optional[Dict[str, Any]]:
+        """
+        Internal method to fetch latest NAV and fund metadata for a scheme.
+        
+        Args:
+            scheme_code: Mutual fund scheme code
+            
+        Returns:
+            Dict with NAV, ISIN, and metadata, or None on error
         """
         try:
-            self.logger.info(f"Searching schemes with term: {search_term}")
-            all_schemes = self.get_all_schemes()
+            url = f"{self.BASE_URL}/mf/{scheme_code}/latest"
             
-            # Filter schemes matching search term
-            matching_schemes = [
-                scheme for scheme in all_schemes
-                if search_term.lower() in scheme['name'].lower()
-            ]
+            response = self.session.get(url, timeout=self.TIMEOUT)
+            response.raise_for_status()
             
-            self.logger.info(f"Found {len(matching_schemes)} matching schemes")
-            return matching_schemes
+            data = response.json()
             
+            if data.get("status") != "SUCCESS":
+                self.logger.warning(f"[MFAPI-NAV] Status: {data.get('status')} for scheme {scheme_code}")
+                return None
+            
+            meta = data.get("meta", {})
+            nav_list = data.get("data", [])
+            
+            if not nav_list:
+                self.logger.warning(f"[MFAPI-NAV] No NAV data for scheme {scheme_code}")
+                return None
+            
+            latest_nav = nav_list[0]
+            
+            result = {
+                "scheme_code": meta.get("scheme_code"),
+                "scheme_name": meta.get("scheme_name"),
+                "fund_house": meta.get("fund_house"),
+                "scheme_category": meta.get("scheme_category"),
+                "scheme_type": meta.get("scheme_type"),
+                "isin_growth": meta.get("isin_growth"),
+                "isin_div_reinvestment": meta.get("isin_div_reinvestment"),
+                "nav": self._safe_float(latest_nav.get("nav")),
+                "nav_date": latest_nav.get("date"),  # Format: DD-MM-YYYY
+                "status": "SUCCESS"
+            }
+            
+            self.logger.debug(
+                f"[MFAPI-NAV] ✓ Fetched: NAV={result['nav']}, ISIN={result['isin_growth']}"
+            )
+            
+            return result
+            
+        except requests.exceptions.Timeout:
+            self.logger.error(f"[MFAPI-NAV] Timeout fetching scheme {scheme_code}")
+            return None
+        except requests.exceptions.ConnectionError:
+            self.logger.error(f"[MFAPI-NAV] Connection error fetching scheme {scheme_code}")
+            return None
         except Exception as e:
-            self.logger.error(f"Error searching schemes: {str(e)}")
-            return []
+            self.logger.error(f"[MFAPI-NAV] Error fetching scheme {scheme_code}: {str(e)}")
+            return None
+    
+    def _fuzzy_best_match(
+        self, 
+        query: str, 
+        choices: List[str], 
+        threshold: int = 85
+    ) -> Optional[Tuple[str, int, int]]:
+        """
+        Use RapidFuzz token_set_ratio to find best match.
+        
+        token_set_ratio is ideal for fund names because:
+        - Ignores word order: "HDFC Mid Cap" matches "Mid Cap HDFC"
+        - Handles duplicates: "HDFC HDFC" matches "HDFC"
+        - Robust to suffixes: "Fund Growth" matches "Fund - Growth Option"
+        
+        Args:
+            query: Query string (e.g., "HDFC Mid Cap")
+            choices: List of candidates (e.g., scheme names from search)
+            threshold: Minimum score required (0-100)
+            
+        Returns:
+            Tuple of (matched_string, score, index) if match found, else None
+        """
+        if not query or not choices:
+            return None
+        
+        result = process.extractOne(
+            query,
+            choices,
+            scorer=fuzz.token_set_ratio,
+            processor=lambda x: x.lower().strip() if x else "",
+            score_cutoff=threshold
+        )
+        
+        return result
+    
+    @staticmethod
+    def _safe_float(value) -> Optional[float]:
+        """Safely convert value to float, handling strings and None."""
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except (ValueError, AttributeError):
+                return None
+        return None
+    
+    def close(self):
+        """Close the HTTP session."""
+        if hasattr(self, 'session') and self.session:
+            self.session.close()
+            self.logger.debug("HTTP session closed")
+    
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.close()

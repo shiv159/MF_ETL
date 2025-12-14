@@ -10,7 +10,19 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.mf_etl.utils.search_utils import safe_numeric
+from src.mf_etl.utils.config_loader import load_config  # noqa: E402
+from src.mf_etl.utils.search_utils import safe_numeric  # noqa: E402
+
+# Load validation config
+try:
+    config_path = ROOT / 'config' / 'config.yaml'
+    config = load_config(str(config_path))
+    validation_config = config.get('validation', {})
+    holdings_config = validation_config.get('holdings', {})
+    VALUE_DEVIATION_TOLERANCE = holdings_config.get('value_deviation_tolerance', 0.02)
+except Exception as e:
+    logger.warning(f"Failed to load config for holding validation: {e}. Using defaults.")
+    VALUE_DEVIATION_TOLERANCE = 0.02
 
 
 def _safe_numeric(value, target_type=float, default=None):
@@ -68,7 +80,7 @@ def validate_holdings(holdings: List[Dict]) -> Tuple[List[Dict], List[str]]:
                 expected = units * nav
                 if expected > 0:
                     deviation = abs(value - expected) / expected
-                    if deviation > 0.02:
+                    if deviation > VALUE_DEVIATION_TOLERANCE:
                         warnings.append(
                             f"{fund_name}: reported value {value:.2f} deviates from units*nav {expected:.2f} by {deviation * 100:.2f}%"
                         )

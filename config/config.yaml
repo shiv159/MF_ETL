@@ -23,15 +23,12 @@ retry_config:
 
 # Feature flags for optional functionality
 feature_flags:
-  caching:
-    enabled: true
-    ttl_minutes: 60  # Cache TTL in minutes (0 = no expiry)
   correlation_id_tracking:
     enabled: true
   concurrent_enrichment:
     enabled: true
     max_concurrent: 5
-    timeout_per_fund: 300  # seconds
+    timeout_per_fund: 15  # seconds
 
 # Data validation thresholds
 validation:
@@ -39,6 +36,9 @@ validation:
     min_value: 0.01
     max_value: 100000
     max_age_days: 7
+  
+  holdings:
+    value_deviation_tolerance: 0.02  # Allow 2% deviation in units*nav vs reported value
   
   sector_breakdown:
     min_sectors: 3
@@ -48,10 +48,26 @@ validation:
     min_constituents: 10
     max_price_change_percent: 20  # Alert if daily change > 20%
 
-# Data source configurations
+# MFAPI.in configuration (Primary fund resolution and NAV source)
+# API Docs: https://www.mfapi.in/docs/
+mfapi:
+  timeout: 10                    # Request timeout in seconds
+  max_retries: 3                 # Max retry attempts for failed requests
+  fuzzy_threshold: 85            # RapidFuzz token_set_ratio threshold (0-100)
+  base_url: "https://api.mfapi.in"  # Base URL for MFAPI (do not change)
+  endpoints:
+    search: "/mf/search"         # Search endpoint: GET /mf/search?q={query}
+    latest: "/mf/{scheme_code}/latest"  # NAV endpoint: GET /mf/{scheme_code}/latest
+
+# Enrichment configuration
+enrichment:
+  # Temporary: best_scheme_threshold no longer used (mftool/FundResolver removed)
+  best_scheme_threshold: 0.65  # DEPRECATED - kept for backward compatibility
+
+# Data source configurations (DEPRECATED)
 data_sources:
   mftool:
-    enabled: true
+    enabled: false          # DEPRECATED - Replaced by MFAPI
     timeout: 30
   
   yahooquery:
@@ -66,8 +82,19 @@ data_sources:
     enabled: true
     timeout: 30
 
-# Output settings
-output:
-  save_raw_data: true
-  data_directory: "data/"
-  export_format: ["json", "csv"]
+# ISIN data configuration (DEPRECATED)
+# ISIN is now fetched directly from MFAPI.in in the search_and_get_fund() method
+# This section kept for reference only. Can be removed in future releases.
+isin_data:
+  cache_dir: "data/isin_cache"           # DEPRECATED
+  cache_ttl_days: 7                      # DEPRECATED
+  auto_load_on_startup: false            # DEPRECATED - Set to false, not used in new flow
+  log_stale_warning: false               # DEPRECATED
+  fuzzy_match_threshold: 90              # DEPRECATED
+  
+  # Fund resolver settings (DEPRECATED - FundResolver removed)
+  fund_resolver:
+    prefer_direct_plan: true             # DEPRECATED
+    rapidfuzz_token_set_threshold: 85    # DEPRECATED
+    rapidfuzz_wratio_fallback: 75        # DEPRECATED
+    max_candidate_logging: 3             # DEPRECATED

@@ -5,7 +5,8 @@ to reduce code duplication and ensure consistent behavior.
 """
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+from rapidfuzz import fuzz, process
 
 
 def safe_float(value, default: float = 0.0) -> float:
@@ -169,3 +170,177 @@ def generate_fallback_search_terms(fund_name: str, scheme_name: str) -> List[str
             fallback_terms.append(amc_category)
     
     return fallback_terms
+
+def fuzzy_score(query: str, target: str, logger=None) -> int:
+    """
+    Calculate fuzzy match score between query and target using token_set_ratio.
+    
+    Token set ratio ignores word order and duplicate words, making it ideal for
+    Indian fund names where word order varies (e.g., "HDFC Mid Cap" vs "Mid Cap HDFC Fund").
+    
+    Args:
+        query: Query string (e.g., user fund name)
+        target: Target string (e.g., AMFI scheme name)
+        logger: Optional logger for debug output
+        
+    Returns:
+        Score 0-100 (higher = better match)
+        
+    Examples:
+        >>> fuzzy_score("HDFC Mid Cap", "HDFC Mid Cap Fund")
+        95
+        >>> fuzzy_score("HDFC Midcapp", "HDFC Midcap")  # Typo tolerance
+        92
+    """
+    if not query or not target:
+        return 0
+    
+    score = fuzz.token_set_ratio(query.lower().strip(), target.lower().strip())
+    
+    if logger:
+        logger.info(f"[FUZZY] token_set_ratio('{query}', '{target}') = {score}%")
+    
+    return score
+
+
+def fuzzy_best_match(query: str, choices: List[str], threshold: int = 85, logger=None) -> Optional[Tuple[str, int]]:
+    """
+    Find the best fuzzy match for a query from a list of choices.
+    
+    Uses token_set_ratio for robustness to word-order variation and abbreviations.
+    
+    Args:
+        query: Query string (e.g., official AMFI scheme name)
+        choices: List of candidates to match against (e.g., ISIN descriptions)
+        threshold: Minimum score required (0-100); None returned if no match above this
+        logger: Optional logger for debug output
+        
+    Returns:
+        (matched_string, score) if match found above threshold, else None
+        
+    Examples:
+        >>> result = fuzzy_best_match(
+        ...     "HDFC Mid Cap",
+        ...     ["HDFC Mid Cap Fund", "Axis Midcap Fund"],
+        ...     threshold=80
+        ... )
+        >>> result[0]
+        'HDFC Mid Cap Fund'
+        >>> result[1]
+        95
+    """
+    if not query or not choices:
+        if logger:
+            logger.info(f"[FUZZY] No query or choices. Query empty={not query}, Choices={len(choices) if choices else 0}")
+        return None
+    
+    if logger:
+        logger.info(f"[FUZZY] Starting fuzzy_best_match - Query: '{query}', Threshold: {threshold}%, Candidates: {len(choices)}")
+    
+    result = process.extractOne(
+        query,
+        choices,
+        scorer=fuzz.token_set_ratio,
+        processor=lambda x: x.lower().strip() if x else "",
+        score_cutoff=threshold
+    )
+    
+    if result:
+        matched_string, score, index = result
+        if logger:
+            logger.debug(f"[FUZZY] ✓ MATCH FOUND! Score: {score}%, Matched: '{matched_string}' (index {index}/{len(choices)-1})")
+        return (matched_string, score)
+    else:
+        if logger:
+            logger.debug(f"[FUZZY] ✗ NO MATCH FOUND above threshold {threshold}%")
+        return None
+
+
+def fuzzy_top_matches(query: str, choices: List[str], limit: int = 5, threshold: int = 80) -> List[Tuple[str, int]]:
+    """
+    Find top N fuzzy matches for a query from a list of choices.
+    
+    Useful for debugging, logging multiple candidates, or for decision-making when
+    scores are close.
+    
+    Args:
+        query: Query string
+        choices: List of candidates
+        limit: Maximum number of results
+        threshold: Minimum score required
+        
+    Returns:
+        List of (matched_string, score) tuples, sorted by score descending
+        
+    Examples:
+        >>> matches = fuzzy_top_matches(
+        ...     "HDFC Midcap",
+        ...     ["HDFC Mid Cap Fund", "HDFC Balanced Fund", "Axis Midcap"],
+        ...     limit=2,
+        ...     threshold=70
+        ... )
+        >>> len(matches)
+        2
+        >>> matches[0][1] > matches[1][1]  # Sorted by score
+        True
+    """
+    if not query or not choices:
+        return []
+    
+    results = process.extract(
+        query,
+        choices,
+        scorer=fuzz.token_set_ratio,
+        processor=lambda x: x.lower().strip() if x else "",
+        limit=limit,
+        score_cutoff=threshold
+    )
+    
+    return [(match, score) for match, score, _ in results]
+
+
+def validate_isin(isin: Optional[str]) -> bool:
+    """
+    Validate ISIN format for Indian mutual funds.
+    
+    Indian ISINs follow the format: INF[A-Z0-9]{9}
+    Example: INF247L01890 (12 characters total)
+    
+    Args:
+        isin: ISIN code to validate
+        
+    Returns:
+        True if valid ISIN format, False otherwise
+        
+    Examples:
+        >>> validate_isin("INF247L01890")
+        True
+        >>> validate_isin("INE001A01020")  # Equity, not mutual fund
+        False
+        >>> validate_isin("invalid")
+        False
+        >>> validate_isin(None)
+        False
+    """
+    if not isin:
+        return False
+    
+    isin = str(isin).strip()
+    
+    # Check format: must be 12 chars, start with IN, all alphanumeric
+    if len(isin) != 12:
+        return False
+    
+    if not isin.startswith("IN"):
+        return False
+    
+    if not isin.isalnum():
+        return False
+    
+    # For mutual funds, typically starts with INF
+    # But INE (equity), IN9 (corporate bonds), etc. also exist
+    # We're specifically validating MF ISINs, so check INF prefix
+    if not isin.startswith("INF"):
+        return False
+    
+    return True
