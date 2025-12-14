@@ -8,6 +8,7 @@ import asyncio
 import json
 from services.enrichment.fund_enricher import FundEnricher
 from services.enrichment.holding_validator import validate_holdings
+from services.enrichment.mstarpy_helper import get_mstar_metadata
 
 
 # Hardcoded holdings data to enrich
@@ -117,10 +118,10 @@ async def demo_enrich():
         "upload_id": "demo-001",
         "enriched_holdings": [
             {
-                "original_fund_name": h["fund_name"],
-                "enriched": e.dict() if e else None
-            }
-            for h, e in zip(validated, enriched_results)
+                    "original_fund_name": h["fund_name"],
+                    "enriched": (lambda ed: {**ed, "mstarpy_metadata": get_mstar_metadata(ed.get("isin"))} if ed and ed.get("isin") else ed)(e.dict() if e else None)
+                }
+                for h, e in zip(validated, enriched_results)
         ],
         "summary": {
             "total_requested": len(validated),

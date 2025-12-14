@@ -30,6 +30,7 @@ from services.api.utils import (
     retry_with_backoff,
     extract_upload_id_from_body,
 )
+from services.enrichment.mstarpy_helper import get_mstar_metadata
 
 router = APIRouter()
 
@@ -98,6 +99,20 @@ async def _run_enrichment_concurrent(
         for idx, (holding, enriched_fund) in enumerate(zip(validated_holdings, enrichment_results)):
             fund_name = holding["fund_name"]
             if enriched_fund:
+                # Attach MstarPy metadata when ISIN is available (non-blocking call is fine here)
+                try:
+                    if getattr(enriched_fund, 'isin', None):
+                        meta = get_mstar_metadata(enriched_fund.isin)
+                        # If payload is a Pydantic model, set attribute directly
+                        try:
+                            setattr(enriched_fund, 'mstarpy_metadata', meta)
+                        except Exception:
+                            # If enriched_fund is plain dict, merge
+                            if isinstance(enriched_fund, dict):
+                                enriched_fund['mstarpy_metadata'] = meta
+                except Exception:
+                    logger.debug(f"Failed to fetch MstarPy metadata for ISIN: {getattr(enriched_fund, 'isin', None)}")
+
                 enriched_funds.append(enriched_fund)
                 logger.debug(f"Successfully enriched {idx + 1}/{len(validated_holdings)}: {fund_name}")
             else:

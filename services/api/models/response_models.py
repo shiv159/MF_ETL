@@ -12,6 +12,7 @@ class EnrichedFund(BaseModel):
     top_holdings: Optional[List[Dict[str, Any]]]
     current_nav: Optional[float]
     nav_as_of: Optional[str]
+    mstarpy_metadata: Optional[Dict[str, Any]] = None
 
 
 class EnrichmentQuality(BaseModel):
