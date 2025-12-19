@@ -114,14 +114,26 @@ async def demo_enrich():
     # Display enrichment response structure (like API would return)
     print("API RESPONSE STRUCTURE (JSON):")
     print("-" * 80)
+    # Build enriched holdings by fetching mstar metadata concurrently
+    async def _build_enriched_item(e):
+        if not e or not getattr(e, 'isin', None):
+            return e.dict() if e else None
+        try:
+            meta = await get_mstar_metadata(e.isin)
+        except Exception:
+            meta = None
+        return {**e.dict(), "mstarpy_metadata": meta}
+
+    enriched_items = await asyncio.gather(*(_build_enriched_item(e) for e in enriched_results))
+
     response = {
         "upload_id": "demo-001",
         "enriched_holdings": [
             {
-                    "original_fund_name": h["fund_name"],
-                    "enriched": (lambda ed: {**ed, "mstarpy_metadata": get_mstar_metadata(ed.get("isin"))} if ed and ed.get("isin") else ed)(e.dict() if e else None)
-                }
-                for h, e in zip(validated, enriched_results)
+                "original_fund_name": h["fund_name"],
+                "enriched": enriched_item,
+            }
+            for (h, _), enriched_item in zip(zip(validated, enriched_results), enriched_items)
         ],
         "summary": {
             "total_requested": len(validated),

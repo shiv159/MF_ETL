@@ -102,7 +102,12 @@ async def _run_enrichment_concurrent(
                 # Attach MstarPy metadata when ISIN is available (non-blocking call is fine here)
                 try:
                     if getattr(enriched_fund, 'isin', None):
-                        meta = get_mstar_metadata(enriched_fund.isin)
+                        try:
+                            meta = await get_mstar_metadata(enriched_fund.isin)
+                        except Exception as exc:
+                            meta = None
+                            logger.debug("Error awaiting get_mstar_metadata for ISIN=%s: %s", getattr(enriched_fund, 'isin', None), exc)
+
                         # If payload is a Pydantic model, set attribute directly
                         try:
                             setattr(enriched_fund, 'mstarpy_metadata', meta)
@@ -111,7 +116,7 @@ async def _run_enrichment_concurrent(
                             if isinstance(enriched_fund, dict):
                                 enriched_fund['mstarpy_metadata'] = meta
                 except Exception:
-                    logger.debug(f"Failed to fetch MstarPy metadata for ISIN: {getattr(enriched_fund, 'isin', None)}")
+                    logger.debug(f"Failed to attach MstarPy metadata for ISIN: {getattr(enriched_fund, 'isin', None)}")
 
                 enriched_funds.append(enriched_fund)
                 logger.debug(f"Successfully enriched {idx + 1}/{len(validated_holdings)}: {fund_name}")
