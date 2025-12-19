@@ -36,12 +36,36 @@ _config = _load_configuration()
 _timeout_config = _config.get('timeout_config', {})
 TIMEOUT_SECONDS = _timeout_config.get('enrichment_timeout', 120)
 
+# Log the loaded timeout so startup logs make it clear the YAML was read
+logger = logging.getLogger(__name__)
+if TIMEOUT_SECONDS == 120:
+    logger.warning("Enrichment timeout is set to default (120s); check config/config.yaml")
+else:
+    logger.info(f"Loaded enrichment timeout from config: {TIMEOUT_SECONDS}s")
+
+# Extract MFAPI configuration (primary fund resolution source)
+MFAPI_CONFIG = _config.get('mfapi', {})
+MFAPI_TIMEOUT = MFAPI_CONFIG.get('timeout', 10)
+MFAPI_MAX_RETRIES = MFAPI_CONFIG.get('max_retries', 3)
+MFAPI_FUZZY_THRESHOLD = MFAPI_CONFIG.get('fuzzy_threshold', 85)
+
 # Extract feature flags
 _feature_flags = _config.get('feature_flags', {})
 CORRELATION_ID_TRACKING_ENABLED = _feature_flags.get('correlation_id_tracking', {}).get('enabled', True)
 CONCURRENT_ENRICHMENT_ENABLED = _feature_flags.get('concurrent_enrichment', {}).get('enabled', True)
 MAX_CONCURRENT = _feature_flags.get('concurrent_enrichment', {}).get('max_concurrent', 5)
-TIMEOUT_PER_FUND = _feature_flags.get('concurrent_enrichment', {}).get('timeout_per_fund', 15)
+# Compute timeout per fund: prefer explicit config value; otherwise derive a sensible default
+# based on fetcher_timeout and MFAPI timeout multiplier (mfapi_timeout * 6)
+_fetcher_timeout = _timeout_config.get('fetcher_timeout', 30)
+_explicit_timeout_per_fund = _feature_flags.get('concurrent_enrichment', {}).get('timeout_per_fund')
+if _explicit_timeout_per_fund is not None:
+    TIMEOUT_PER_FUND = _explicit_timeout_per_fund
+else:
+    TIMEOUT_PER_FUND = max(_fetcher_timeout, MFAPI_TIMEOUT * 6)
+
+# Log computed timeout per fund for clarity
+logger = logging.getLogger(__name__)
+logger.info(f"Timeout per fund set to: {TIMEOUT_PER_FUND}s (fetcher_timeout={_fetcher_timeout}s, mfapi_timeout={MFAPI_TIMEOUT}s)")
 
 # Extract retry configuration
 _retry_config = _config.get('retry_config', {})
@@ -51,12 +75,6 @@ MAX_RETRY_DELAY = _retry_config.get('max_delay', 10)
 RETRY_BACKOFF_MULTIPLIER = _retry_config.get('backoff_multiplier', 2)
 RETRY_ON_TIMEOUT = _retry_config.get('retry_on_timeout', True)
 RETRY_ON_SERVER_ERROR = _retry_config.get('retry_on_server_error', True)
-
-# Extract MFAPI configuration (primary fund resolution source)
-MFAPI_CONFIG = _config.get('mfapi', {})
-MFAPI_TIMEOUT = MFAPI_CONFIG.get('timeout', 10)
-MFAPI_MAX_RETRIES = MFAPI_CONFIG.get('max_retries', 3)
-MFAPI_FUZZY_THRESHOLD = MFAPI_CONFIG.get('fuzzy_threshold', 85)
 
 # Extract logging configuration
 _logging_config = _config.get('logging', {})

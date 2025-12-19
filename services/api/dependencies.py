@@ -78,6 +78,7 @@ def log_initialization_info(logger: logging.Logger) -> None:
     Logs the loaded configuration for debugging and verification.
     """
     from services.api.config import (
+        TIMEOUT_SECONDS,
         CORRELATION_ID_TRACKING_ENABLED,
         CONCURRENT_ENRICHMENT_ENABLED,
         MAX_CONCURRENT,
@@ -91,6 +92,7 @@ def log_initialization_info(logger: logging.Logger) -> None:
     )
     
     logger.info(f"Feature flags: correlation_id={CORRELATION_ID_TRACKING_ENABLED}, concurrent_enrichment={CONCURRENT_ENRICHMENT_ENABLED}")
+    logger.info(f"Global enrichment timeout: {TIMEOUT_SECONDS}s")
     logger.info(f"Timeout per fund: {TIMEOUT_PER_FUND}s")
     logger.info(f"Retry config: max_retries={MAX_RETRIES}, initial_delay={INITIAL_RETRY_DELAY}s, backoff={RETRY_BACKOFF_MULTIPLIER}x")
     logger.info(f"MFAPI config: timeout={MFAPI_TIMEOUT}s, max_retries={MFAPI_MAX_RETRIES}, fuzzy_threshold={MFAPI_FUZZY_THRESHOLD}%")

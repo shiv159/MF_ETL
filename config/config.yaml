@@ -9,8 +9,8 @@ logging:
 
 # Timeout configuration
 timeout_config:
-  enrichment_timeout: 300  # API enrichment timeout in seconds
-  fetcher_timeout: 30      # Individual fetcher timeout in seconds
+  enrichment_timeout: 300  # API enrichment timeout in seconds (aligned with per-fund timeout)
+  fetcher_timeout: 120     # Individual fetcher timeout in seconds (aligned with per-fund timeout)
 
 # Retry configuration for resilience
 retry_config:
@@ -28,7 +28,10 @@ feature_flags:
   concurrent_enrichment:
     enabled: true
     max_concurrent: 5
-    timeout_per_fund: 15  # seconds
+    # Per-fund timeout in seconds. If omitted, the service computes a sensible
+    # default based on fetcher timeout and MFAPI timeout (max(fetcher_timeout, mfapi.timeout * 6)).
+    # Recommended: 60 or 120 depending on expected external latency.
+    timeout_per_fund: 120  # seconds
 
 # Data validation thresholds
 validation:
@@ -51,7 +54,7 @@ validation:
 # MFAPI.in configuration (Primary fund resolution and NAV source)
 # API Docs: https://www.mfapi.in/docs/
 mfapi:
-  timeout: 10                    # Request timeout in seconds
+  timeout: 60                    # Request timeout in seconds
   max_retries: 3                 # Max retry attempts for failed requests
   fuzzy_threshold: 85            # RapidFuzz token_set_ratio threshold (0-100)
   base_url: "https://api.mfapi.in"  # Base URL for MFAPI (do not change)
