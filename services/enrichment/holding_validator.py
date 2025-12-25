@@ -64,6 +64,16 @@ def validate_holdings(holdings: List[Dict]) -> Tuple[List[Dict], List[str]]:
         nav = _safe_numeric(h.get('nav'), float, None)
         value = _safe_numeric(h.get('value'), float, None)
         
+        # If units missing, try to compute from value and nav
+        if units is None:
+            if value is not None and nav is not None and nav > 0:
+                units = value / nav
+            else:
+                # if both units and value missing, skip this holding
+                if value is None:
+                    warnings.append(f"Skipping holding {fund_name} because both units and value are missing")
+                    continue
+
         if units is not None and units <= 0:
             warnings.append(f"{fund_name}: units must be positive")
             continue
@@ -72,18 +82,19 @@ def validate_holdings(holdings: List[Dict]) -> Tuple[List[Dict], List[str]]:
             warnings.append(f"{fund_name}: nav must be positive")
             continue
 
-        if value is None:
-            if units is not None and nav is not None:
-                value = units * nav
-        else:
-            if units is not None and nav is not None:
-                expected = units * nav
-                if expected > 0:
-                    deviation = abs(value - expected) / expected
-                    if deviation > VALUE_DEVIATION_TOLERANCE:
-                        warnings.append(
-                            f"{fund_name}: reported value {value:.2f} deviates from units*nav {expected:.2f} by {deviation * 100:.2f}%"
-                        )
+        # Compute missing value if possible
+        if value is None and units is not None and nav is not None:
+            value = units * nav
+
+        # Check deviation when all fields are present
+        if value is not None and units is not None and nav is not None:
+            expected = units * nav
+            if expected > 0:
+                deviation = abs(value - expected) / expected
+                if deviation > VALUE_DEVIATION_TOLERANCE:
+                    warnings.append(
+                        f"{fund_name}: reported value {value:.2f} deviates from units*nav {expected:.2f} by {deviation * 100:.2f}%"
+                    )
 
         validated.append({
             'fund_name': fund_name,

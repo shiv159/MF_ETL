@@ -22,7 +22,7 @@ class EnrichmentQuality(BaseModel):
 
 
 class EnrichmentResponse(BaseModel):
-    upload_id: str
+    upload_id: Optional[str]
     status: str
     duration_seconds: Optional[int]
     enriched_funds: List[EnrichedFund]

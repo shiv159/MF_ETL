@@ -3,6 +3,7 @@
 import asyncio
 import time
 import logging
+import uuid
 from typing import Optional, Dict, Any
 
 from fastapi import APIRouter, Request
@@ -167,6 +168,10 @@ def register_enrichment_routes(app_router: APIRouter, enricher: FundEnricher, lo
             EnrichmentResponse with enriched funds and quality metrics
         """
         start_time = time.time()
+        
+        # Ensure there is an upload_id (generate when missing)
+        if not request.upload_id:
+            request.upload_id = f"upload-{uuid.uuid4().hex}"
         
         async def enrichment_with_retries():
             """Wrapper for enrichment with retry logic"""
