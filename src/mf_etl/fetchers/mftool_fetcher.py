@@ -161,29 +161,39 @@ class MFAPIFetcher:
         
         self.logger.debug(f"[MFAPI-RESOLVE] Found {len(search_results)} candidates")
         
-        # STEP 2: RapidFuzz matching
+        # STEP 2: RapidFuzz matching + Plan Preference Scoring
         self.logger.debug(f"[MFAPI-RESOLVE] Step 2: RapidFuzz matching (threshold: {fuzzy_threshold}%)")
         scheme_names = [r.get('schemeName') for r in search_results]
         
-        best_match = self._fuzzy_best_match(
+        # Get all candidates matching the threshold (not just the top 1)
+        fuzzy_candidates = self._fuzzy_all_matches(
             input_fund_name,
             scheme_names,
             threshold=fuzzy_threshold
         )
         
-        if not best_match:
+        if not fuzzy_candidates:
             self.logger.warning(
                 f"[MFAPI-RESOLVE] ✗ No RapidFuzz match above {fuzzy_threshold}% for '{input_fund_name}'"
             )
             return None
         
-        matched_name, score, matched_index = best_match
-        selected_fund = search_results[matched_index]
+        self.logger.debug(
+            f"[MFAPI-RESOLVE] Found {len(fuzzy_candidates)} candidates above {fuzzy_threshold}% threshold"
+        )
+        
+        # STEP 2b: Apply plan preference scoring (Direct > Regular; Growth > Reinvestment)
+        selected_fund, matched_name, score = self._select_best_plan(
+            input_fund_name,
+            search_results,
+            fuzzy_candidates
+        )
+        
         scheme_code = selected_fund.get('schemeCode')
         
         self.logger.info(
-            f"[MFAPI-RESOLVE] ✓ RapidFuzz match: '{matched_name}' "
-            f"(score: {score}%, scheme_code: {scheme_code})"
+            f"[MFAPI-RESOLVE] ✓ Selected: '{matched_name}' "
+            f"(fuzzy_score: {score}%, scheme_code: {scheme_code})"
         )
         
         # STEP 3: Get latest NAV + ISIN
@@ -270,6 +280,39 @@ class MFAPIFetcher:
             self.logger.error(f"[MFAPI-NAV] Error fetching scheme {scheme_code}: {str(e)}")
             return None
     
+    def _fuzzy_all_matches(
+        self,
+        query: str,
+        choices: List[str],
+        threshold: int = 85
+    ) -> List[Tuple[str, int, int]]:
+        """
+        Get all fuzzy matches above threshold (not just the top 1).
+        
+        Returns list of (matched_string, score, index) sorted by score descending.
+        
+        Args:
+            query: Query string (e.g., "Tata Small Cap")
+            choices: List of candidates (e.g., scheme names)
+            threshold: Minimum score required (0-100)
+            
+        Returns:
+            List of (matched_string, score, index) tuples, sorted by score descending
+        """
+        if not query or not choices:
+            return []
+        
+        results = process.extract(
+            query,
+            choices,
+            scorer=fuzz.token_set_ratio,
+            processor=lambda x: x.lower().strip() if x else "",
+            score_cutoff=threshold
+        )
+        
+        # Results are already sorted by score descending
+        return results
+
     def _fuzzy_best_match(
         self, 
         query: str, 
@@ -304,6 +347,91 @@ class MFAPIFetcher:
         )
         
         return result
+    
+    def _select_best_plan(
+        self,
+        input_fund_name: str,
+        search_results: List[Dict[str, Any]],
+        fuzzy_matches: List[Tuple[str, int, int]]
+    ) -> Tuple[Dict[str, Any], str, int]:
+        """
+        From candidates that passed fuzzy matching, select best by plan preference.
+        
+        Scoring hierarchy (when user doesn't specify plan):
+        1. Direct Plan preferred over Regular (Direct +10)
+        2. Growth preferred over Reinvestment/IDCW (Growth +5, Reinvestment/IDCW -5)
+        3. If tied, use fuzzy match score as tiebreaker
+        
+        Examples:
+            "Tata Small Cap Fund" → picks "Tata Small Cap Fund Direct Plan - Growth"
+            "HDFC Mid Cap Direct" → picks "HDFC Mid Cap Fund Direct Plan - Growth"
+            "HDFC Mid Cap Growth" → picks highest-scoring growth variant
+        
+        Args:
+            input_fund_name: Original user input
+            search_results: All search results from API
+            fuzzy_matches: List of (name, score, index) that passed fuzzy threshold
+            
+        Returns:
+            Tuple of (selected_fund_dict, scheme_name, fuzzy_score)
+        """
+        def plan_preference_score(scheme_name: str) -> int:
+            """Compute plan preference bonus for a scheme name.
+            
+            Scoring hierarchy (when user doesn't specify plan):
+            1. Growth is strongly preferred (most common option) → +15
+            2. Direct Plan preferred over Regular → +10 / +0
+            3. Avoid Reinvestment/IDCW if not explicitly requested → -20
+            
+            Final ranking example for "Tata Small Cap Fund" (no plan specified):
+            - Direct Plan-Growth: 15 + 10 = +25 ✓ BEST
+            - Regular Plan-Growth: 15 + 0 = +15
+            - Direct Plan-Reinvestment: -20 + 10 = -10
+            - Regular Plan-Reinvestment: -20 + 0 = -20
+            """
+            score = 0
+            name_lower = scheme_name.lower()
+            
+            # Growth vs Reinvestment/IDCW is the PRIMARY distinction
+            # (users almost always want Growth unless they explicitly ask for Reinvestment)
+            if 'growth' in name_lower:
+                score += 15
+            elif 'reinvestment' in name_lower or 'idcw' in name_lower:
+                score -= 20
+            
+            # Direct vs Regular is SECONDARY preference (bonus/penalty applied on top)
+            if 'direct' in name_lower:
+                score += 10
+            elif 'regular' in name_lower:
+                score += 0
+            
+            return score
+        
+        # Rank candidates by: plan preference + fuzzy score
+        ranked = []
+        for scheme_name, fuzzy_score, idx in fuzzy_matches:
+            plan_score = plan_preference_score(scheme_name)
+            total_score = fuzzy_score + plan_score  # e.g., 98 + 10 + 5 = 113
+            ranked.append((total_score, scheme_name, fuzzy_score, idx))
+        
+        # Sort by total score descending, then fuzzy score as tiebreaker
+        ranked.sort(key=lambda x: (-x[0], -x[2]))
+        
+        total_score, scheme_name, fuzzy_score, selected_idx = ranked[0]
+        selected_fund = search_results[selected_idx]
+        
+        if len(ranked) > 1:
+            self.logger.debug(
+                f"[MFAPI-PLAN] Multiple candidates found. Ranked by plan preference:"
+            )
+            for i, (total, name, fuzz, _) in enumerate(ranked[:3], 1):
+                plan_bonus = int(total - fuzz)
+                self.logger.debug(
+                    f"  [{i}] {name} (fuzzy={int(fuzz)}%, plan_bonus={plan_bonus:+d}, total={int(total)}%)"
+                )
+            self.logger.debug(f"  → Selected: {scheme_name}")
+        
+        return selected_fund, scheme_name, fuzzy_score
     
     @staticmethod
     def _safe_float(value) -> Optional[float]:

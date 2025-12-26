@@ -267,11 +267,26 @@ class FundEnricher:
         
         self.logger.info(
             f"[ENRICH-PHASE1] ✓ Fund resolved: '{mfapi_result.get('scheme_name')}' "
-            f"(ISIN: {mfapi_result.get('isin_growth')}, NAV: {mfapi_result.get('nav')})"
+            f"(ISIN(growth): {mfapi_result.get('isin_growth')}, "
+            f"ISIN(div_reinvestment): {mfapi_result.get('isin_div_reinvestment')}, "
+            f"NAV: {mfapi_result.get('nav')})"
         )
         
         # Extract key data from MFAPI response
-        fund_isin = mfapi_result.get('isin_growth')
+        # Try both ISIN fields in order (growth first, then div_reinvestment)
+        isin_candidates = [
+            ("isin_growth", mfapi_result.get("isin_growth")),
+            ("isin_div_reinvestment", mfapi_result.get("isin_div_reinvestment")),
+        ]
+        
+        fund_isin = None
+        isin_source = None
+        for source, value in isin_candidates:
+            if value and validate_isin(value):
+                fund_isin = value
+                isin_source = source
+                break
+        
         scheme_name = mfapi_result.get('scheme_name')
         amc = mfapi_result.get('fund_house')
         category = mfapi_result.get('scheme_category')
@@ -280,9 +295,9 @@ class FundEnricher:
         
         # ===== PHASE 2: Fetch Holdings via MstarPy =====
         holdings = None
-        if fund_isin and validate_isin(fund_isin):
+        if fund_isin:
             self.logger.debug(
-                f"[ENRICH-PHASE2] Fetching holdings using ISIN: {fund_isin}"
+                f"[ENRICH-PHASE2] Fetching holdings using ISIN: {fund_isin} (source={isin_source})"
             )
             holdings = self._fetch_holdings_from_mstar(fund_isin)
             if holdings:
@@ -295,14 +310,14 @@ class FundEnricher:
                 )
         else:
             self.logger.warning(
-                f"[ENRICH-PHASE2] ✗ Invalid or missing ISIN: {fund_isin}"
+                "[ENRICH-PHASE2] ✗ MFAPI did not provide a usable ISIN; skipping holdings fetch"
             )
         
         # ===== PHASE 3: Fetch Sectors via MstarPy =====
         sectors = None
-        if fund_isin and validate_isin(fund_isin):
+        if fund_isin:
             self.logger.debug(
-                f"[ENRICH-PHASE3] Fetching sector allocation using ISIN: {fund_isin}"
+                f"[ENRICH-PHASE3] Fetching sector allocation using ISIN: {fund_isin} (source={isin_source})"
             )
             sectors = self._fetch_sector_from_mstar(fund_isin)
             if sectors:

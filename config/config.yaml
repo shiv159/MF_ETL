@@ -56,7 +56,7 @@ validation:
 mfapi:
   timeout: 60                    # Request timeout in seconds
   max_retries: 3                 # Max retry attempts for failed requests
-  fuzzy_threshold: 85            # RapidFuzz token_set_ratio threshold (0-100)
+  fuzzy_threshold: 80            # RapidFuzz token_set_ratio threshold (0-100); lowered from 85 to capture Growth variants with hyphens (e.g., "Fund-Direct Plan-Growth" scores 84%)
   base_url: "https://api.mfapi.in"  # Base URL for MFAPI (do not change)
   endpoints:
     search: "/mf/search"         # Search endpoint: GET /mf/search?q={query}
