@@ -42,7 +42,11 @@ def _safe_numeric(value, target_type=float, default=None):
 
 def validate_holdings(holdings: List[Dict]) -> Tuple[List[Dict], List[str]]:
     """
-    Validate mutual fund holdings with type coercion and validation.
+    Validate mutual fund holdings with lenient type coercion.
+    
+    Less strict validation: allows holdings with only fund_name.
+    Missing units/value will be None, but holding will pass validation
+    so that enrichment API can still fetch fund metadata (NAV, ISIN, etc.).
     
     Args:
         holdings: List of holding dictionaries with keys: fund_name, units, nav, value, etc.
@@ -68,19 +72,8 @@ def validate_holdings(holdings: List[Dict]) -> Tuple[List[Dict], List[str]]:
         if units is None:
             if value is not None and nav is not None and nav > 0:
                 units = value / nav
-            else:
-                # if both units and value missing, skip this holding
-                if value is None:
-                    warnings.append(f"Skipping holding {fund_name} because both units and value are missing")
-                    continue
-
-        if units is not None and units <= 0:
-            warnings.append(f"{fund_name}: units must be positive")
-            continue
-
-        if nav is not None and nav <= 0:
-            warnings.append(f"{fund_name}: nav must be positive")
-            continue
+            # If both units and value missing, allow it through
+            # (holding will be enriched with just fund_name, no value calculation)
 
         # Compute missing value if possible
         if value is None and units is not None and nav is not None:
@@ -96,6 +89,8 @@ def validate_holdings(holdings: List[Dict]) -> Tuple[List[Dict], List[str]]:
                         f"{fund_name}: reported value {value:.2f} deviates from units*nav {expected:.2f} by {deviation * 100:.2f}%"
                     )
 
+        # Allow holding through even if units/value are None
+        # Enrichment API will still fetch fund metadata
         validated.append({
             'fund_name': fund_name,
             'units': units,

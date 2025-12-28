@@ -49,6 +49,13 @@ MFAPI_TIMEOUT = MFAPI_CONFIG.get('timeout', 10)
 MFAPI_MAX_RETRIES = MFAPI_CONFIG.get('max_retries', 3)
 MFAPI_FUZZY_THRESHOLD = MFAPI_CONFIG.get('fuzzy_threshold', 85)
 
+# Extract NAV history configuration
+_nav_history_config = MFAPI_CONFIG.get('nav_history', {})
+NAV_HISTORY_ENABLED = _nav_history_config.get('enabled', True)
+NAV_HISTORY_YEARS = _nav_history_config.get('years', 10)
+NAV_AGGREGATION_STRATEGY = _nav_history_config.get('aggregation', 'month_end')
+NAV_FALLBACK_STRATEGY = _nav_history_config.get('fallback_strategy', 'previous_day')
+
 # Extract feature flags
 _feature_flags = _config.get('feature_flags', {})
 CORRELATION_ID_TRACKING_ENABLED = _feature_flags.get('correlation_id_tracking', {}).get('enabled', True)

@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 
 
 class EnrichedFund(BaseModel):
@@ -13,6 +13,9 @@ class EnrichedFund(BaseModel):
     current_nav: Optional[float]
     nav_as_of: Optional[str]
     mstarpy_metadata: Optional[Dict[str, Any]] = None
+
+    # Store NAV history privately so downstream layers can merge it into mstarpy metadata
+    _nav_history: Optional[Dict[str, float]] = PrivateAttr(default=None)
 
 
 class EnrichmentQuality(BaseModel):

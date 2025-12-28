@@ -100,6 +100,14 @@ async def _run_enrichment_concurrent(
         for idx, (holding, enriched_fund) in enumerate(zip(validated_holdings, enrichment_results)):
             fund_name = holding["fund_name"]
             if enriched_fund:
+                # Convert Pydantic model to dict for easier manipulation
+                if hasattr(enriched_fund, 'model_dump'):
+                    fund_dict = enriched_fund.model_dump()
+                else:
+                    fund_dict = enriched_fund.dict() if hasattr(enriched_fund, 'dict') else enriched_fund
+                
+                nav_history_data = getattr(enriched_fund, '_nav_history', None)
+
                 # Attach MstarPy metadata when ISIN is available (non-blocking call is fine here)
                 try:
                     if getattr(enriched_fund, 'isin', None):
@@ -109,17 +117,26 @@ async def _run_enrichment_concurrent(
                             meta = None
                             logger.debug("Error awaiting get_mstar_metadata for ISIN=%s: %s", getattr(enriched_fund, 'isin', None), exc)
 
-                        # If payload is a Pydantic model, set attribute directly
-                        try:
-                            setattr(enriched_fund, 'mstarpy_metadata', meta)
-                        except Exception:
-                            # If enriched_fund is plain dict, merge
-                            if isinstance(enriched_fund, dict):
-                                enriched_fund['mstarpy_metadata'] = meta
-                except Exception:
-                    logger.debug(f"Failed to attach MstarPy metadata for ISIN: {getattr(enriched_fund, 'isin', None)}")
+                        # Include nav_history in mstarpy_metadata
+                        meta_payload: Optional[Dict[str, Any]] = meta or {}
+                        if isinstance(meta_payload, dict) and nav_history_data:
+                            meta_payload['nav_history'] = nav_history_data
+                            logger.info(
+                                f"[ENRICH-RESPONSE] ✓ Added nav_history ({len(nav_history_data)} months) to mstarpy_metadata"
+                            )
 
-                enriched_funds.append(enriched_fund)
+                        # Update the dict with mstarpy_metadata (even if only nav history is present)
+                        if meta_payload:
+                            fund_dict['mstarpy_metadata'] = meta_payload
+                        elif nav_history_data:
+                            fund_dict['mstarpy_metadata'] = {'nav_history': nav_history_data}
+                except Exception as e:
+                    logger.error(f"Failed to attach MstarPy metadata for ISIN: {getattr(enriched_fund, 'isin', None)} - Error: {e}", exc_info=True)
+
+                # Ensure nav_history never leaks to the top-level payload
+                fund_dict.pop('nav_history', None)
+
+                enriched_funds.append(fund_dict)
                 logger.debug(f"Successfully enriched {idx + 1}/{len(validated_holdings)}: {fund_name}")
             else:
                 message = f"Could not enrich '{fund_name}'"

@@ -8,6 +8,7 @@ from services.api.config import (
     LOG_LEVEL,
     CORRELATION_ID_TRACKING_ENABLED,
     MFAPI_CONFIG,
+    NAV_HISTORY_YEARS,
 )
 from services.api.middleware.correlation_id import CorrelationIdFilter
 from services.api.config import get_retry_config
@@ -53,6 +54,7 @@ def initialize_enricher(logger: Optional[logging.Logger] = None) -> FundEnricher
     Creates and configures the FundEnricher with:
     - Logger instance
     - MFAPI configuration for fund resolution
+    - NAV history years configuration
     - Retry configuration for resilience
     
     Args:
@@ -67,7 +69,8 @@ def initialize_enricher(logger: Optional[logging.Logger] = None) -> FundEnricher
     enricher = FundEnricher(
         logger=logger,
         mfapi_config=MFAPI_CONFIG,
-        retry_config=get_retry_config()
+        retry_config=get_retry_config(),
+        nav_history_years=NAV_HISTORY_YEARS
     )
     return enricher
 
@@ -89,6 +92,9 @@ def log_initialization_info(logger: logging.Logger) -> None:
         MFAPI_TIMEOUT,
         MFAPI_MAX_RETRIES,
         MFAPI_FUZZY_THRESHOLD,
+        NAV_HISTORY_ENABLED,
+        NAV_HISTORY_YEARS,
+        NAV_AGGREGATION_STRATEGY,
     )
     
     logger.info(f"Feature flags: correlation_id={CORRELATION_ID_TRACKING_ENABLED}, concurrent_enrichment={CONCURRENT_ENRICHMENT_ENABLED}")
@@ -96,3 +102,4 @@ def log_initialization_info(logger: logging.Logger) -> None:
     logger.info(f"Timeout per fund: {TIMEOUT_PER_FUND}s")
     logger.info(f"Retry config: max_retries={MAX_RETRIES}, initial_delay={INITIAL_RETRY_DELAY}s, backoff={RETRY_BACKOFF_MULTIPLIER}x")
     logger.info(f"MFAPI config: timeout={MFAPI_TIMEOUT}s, max_retries={MFAPI_MAX_RETRIES}, fuzzy_threshold={MFAPI_FUZZY_THRESHOLD}%")
+    logger.info(f"NAV History config: enabled={NAV_HISTORY_ENABLED}, years={NAV_HISTORY_YEARS}, aggregation={NAV_AGGREGATION_STRATEGY}")

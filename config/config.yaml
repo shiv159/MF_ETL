@@ -61,6 +61,11 @@ mfapi:
   endpoints:
     search: "/mf/search"         # Search endpoint: GET /mf/search?q={query}
     latest: "/mf/{scheme_code}/latest"  # NAV endpoint: GET /mf/{scheme_code}/latest
+  nav_history:
+    enabled: true                # Enable NAV history aggregation
+    years: 10                    # Fetch 10 years of historical NAV data
+    aggregation: "month_end"     # Aggregation strategy: "month_end" or "month_average"
+    fallback_strategy: "previous_day"  # For holidays: use previous day's NAV if month-end missing
 
 # Enrichment configuration
 enrichment:

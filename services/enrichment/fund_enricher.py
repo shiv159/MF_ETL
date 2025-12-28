@@ -4,7 +4,9 @@ import sys
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
+from datetime import datetime
+from calendar import monthrange
 
 from services.api.models.response_models import EnrichedFund
 
@@ -26,6 +28,107 @@ correlation_id_var: ContextVar[str] = ContextVar('correlation_id', default=None)
 def get_correlation_id() -> str:
     """Get current correlation ID from context."""
     return correlation_id_var.get() or "no-id"
+
+
+def aggregate_nav_to_monthly(
+    daily_nav_array: List[Dict[str, str]],
+    fallback_strategy: str = 'previous_day'
+) -> Tuple[Optional[float], Optional[str], Dict[str, float]]:
+    """
+    Aggregate daily NAV data to monthly and extract latest NAV.
+    
+    Handles:
+    - String to float conversion
+    - Date parsing (DD-MM-YYYY format from MFAPI)
+    - Month-end NAV extraction with fallback for holidays
+    - Returns monthly aggregated data (YYYY-MM: NAV)
+    
+    Args:
+        daily_nav_array: List of {"date": "DD-MM-YYYY", "nav": "123.45"} (sorted by date descending)
+        fallback_strategy: "previous_day" - use previous day's NAV if month-end is missing
+        
+    Returns:
+        Tuple of (current_nav: float, nav_as_of_date: str DD-MM-YYYY, nav_history: Dict[YYYY-MM: float])
+        
+    Example:
+        Input: [{"date": "26-12-2025", "nav": "192.59130"}, ...]
+        Output: (192.59, "26-12-2025", {"2025-12": 192.59, "2025-11": 194.98, ...})
+    """
+    if not daily_nav_array:
+        return None, None, {}
+    
+    # Extract latest NAV (first entry, sorted descending)
+    latest_entry = daily_nav_array[0]
+    current_nav = float(latest_entry['nav'])
+    nav_as_of_date = latest_entry['date']  # Already in DD-MM-YYYY format
+    
+    # Group entries by month for aggregation
+    monthly_groups: Dict[str, List[Dict]] = {}
+    
+    debug_log = logger.getEffectiveLevel() == logging.DEBUG
+    
+    for entry in daily_nav_array:
+        try:
+            # Parse date: "26-12-2025" → datetime object
+            date_obj = datetime.strptime(entry['date'], "%d-%m-%Y")
+            month_key = date_obj.strftime("%Y-%m")  # "2025-12"
+            
+            if month_key not in monthly_groups:
+                monthly_groups[month_key] = []
+            
+            monthly_groups[month_key].append({
+                'date_obj': date_obj,
+                'date_str': entry['date'],
+                'nav': float(entry['nav']),
+                'day': date_obj.day
+            })
+        except (ValueError, KeyError) as e:
+            # Skip malformed entries
+            if debug_log:
+                logger.debug(f"[AGG-NAV] Skipping malformed entry: {entry}")
+            continue
+    
+    # Extract month-end NAV for each month
+    nav_history: Dict[str, float] = {}
+    
+    logger.info(f"[AGG-NAV] Processing {len(monthly_groups)} months from {len(daily_nav_array)} daily entries")
+    
+    for month_key in sorted(monthly_groups.keys()):
+        month_entries = monthly_groups[month_key]
+        
+        # Get last day of the month
+        year, month = int(month_key.split('-')[0]), int(month_key.split('-')[1])
+        last_day_of_month = monthrange(year, month)[1]
+        
+        # Try to find month-end entry
+        month_end_entry = None
+        
+        # Strategy 1: Look for exact month-end date
+        for entry in month_entries:
+            if entry['day'] == last_day_of_month:
+                month_end_entry = entry
+                break
+        
+        # Strategy 2: Fallback - use previous day if month-end is holiday/weekend
+        if not month_end_entry and fallback_strategy == 'previous_day':
+            # Sort by day descending to get highest available day
+            sorted_entries = sorted(month_entries, key=lambda x: x['day'], reverse=True)
+            if sorted_entries:
+                month_end_entry = sorted_entries[0]
+                logger.debug(
+                    f"[AGG-NAV] {month_key}: Month-end ({last_day_of_month}th) not found, "
+                    f"using fallback: {month_end_entry['date_str']} (day {month_end_entry['day']})"
+                )
+        
+        # Add to history if found
+        if month_end_entry:
+            nav_history[month_key] = round(month_end_entry['nav'], 2)
+            logger.debug(f"[AGG-NAV] {month_key}: Added NAV={nav_history[month_key]} from {month_end_entry['date_str']}")
+        else:
+            logger.warning(f"[AGG-NAV] {month_key}: No entry found even with fallback")
+    
+    logger.info(f"[AGG-NAV] Final result: {len(nav_history)} months aggregated")
+    return current_nav, nav_as_of_date, nav_history
 
 
 logger = logging.getLogger(__name__)
@@ -74,7 +177,8 @@ class FundEnricher:
         self, 
         logger: Optional[logging.Logger] = None,
         mfapi_config: Optional[Dict] = None,
-        retry_config: Optional[Dict] = None
+        retry_config: Optional[Dict] = None,
+        nav_history_years: int = 10
     ):
         """
         Initialize FundEnricher with MFAPI and MstarPy fetchers.
@@ -83,6 +187,7 @@ class FundEnricher:
             logger: Logger instance
             mfapi_config: Configuration for MFAPI (timeout, max_retries, fuzzy_threshold)
             retry_config: Retry configuration for error handling
+            nav_history_years: Years of NAV history to fetch (default: 10)
         """
         self.logger = logger or logging.getLogger(__name__)
         
@@ -92,6 +197,9 @@ class FundEnricher:
         mfapi_max_retries = mfapi_cfg.get('max_retries', 3)
         self.mfapi_fetcher = MFAPIFetcher(self.logger, timeout=mfapi_timeout, max_retries=mfapi_max_retries)
         self.mfapi_fuzzy_threshold = mfapi_cfg.get('fuzzy_threshold', 85)
+        
+        # NAV history configuration
+        self.nav_history_years = nav_history_years
         
         # Initialize MstarPy fetcher (secondary source for holdings/sectors)
         self.mstar_fetcher = MstarPyFetcher(self.logger)
@@ -252,7 +360,8 @@ class FundEnricher:
         
         mfapi_result = self.mfapi_fetcher.search_and_get_fund(
             fund_name,
-            fuzzy_threshold=self.mfapi_fuzzy_threshold
+            fuzzy_threshold=self.mfapi_fuzzy_threshold,
+            nav_history_years=self.nav_history_years
         )
         
         if not mfapi_result:
@@ -269,7 +378,8 @@ class FundEnricher:
             f"[ENRICH-PHASE1] ✓ Fund resolved: '{mfapi_result.get('scheme_name')}' "
             f"(ISIN(growth): {mfapi_result.get('isin_growth')}, "
             f"ISIN(div_reinvestment): {mfapi_result.get('isin_div_reinvestment')}, "
-            f"NAV: {mfapi_result.get('nav')})"
+            f"Current NAV: {mfapi_result.get('current_nav')} as of {mfapi_result.get('nav_as_of')}, "
+            f"History: {len(mfapi_result.get('nav_history', {}))} months)"
         )
         
         # Extract key data from MFAPI response
@@ -290,8 +400,9 @@ class FundEnricher:
         scheme_name = mfapi_result.get('scheme_name')
         amc = mfapi_result.get('fund_house')
         category = mfapi_result.get('scheme_category')
-        nav = mfapi_result.get('nav')
-        nav_date = mfapi_result.get('nav_date')
+        current_nav = mfapi_result.get('current_nav')
+        nav_as_of = mfapi_result.get('nav_as_of')
+        nav_history = mfapi_result.get('nav_history', {})
         
         # ===== PHASE 2: Fetch Holdings via MstarPy =====
         holdings = None
@@ -338,13 +449,17 @@ class FundEnricher:
             expense_ratio=None,  # Not available from MFAPI
             sector_allocation=sectors,
             top_holdings=holdings,
-            current_nav=nav,
-            nav_as_of=nav_date,
+            current_nav=current_nav,
+            nav_as_of=nav_as_of,
         )
+
+        # Preserve NAV history for downstream metadata enrichment
+        enriched._nav_history = nav_history
         
         self.logger.info(
             f"[ENRICH] ✓ Enrichment complete for '{fund_name}': "
-            f"NAV={nav}, Sectors={len(sectors) if sectors else 0}, "
+            f"Current NAV={current_nav}, NAV History={len(nav_history) if nav_history else 0} months, "
+            f"Sectors={len(sectors) if sectors else 0}, "
             f"Holdings={len(holdings) if holdings else 0}"
         )
         

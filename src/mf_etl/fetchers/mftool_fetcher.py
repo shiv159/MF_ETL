@@ -1,7 +1,7 @@
 """Fetcher for mutual fund data using mfapi.in (free open API)
 
 This module provides access to Indian mutual fund data via mfapi.in:
-- NAV data and history
+- NAV data and history (10 years by default)
 - ISIN codes (isin_growth, isin_div_reinvestment)
 - Fund metadata (AMC, category, scheme name)
 - No authentication required
@@ -11,7 +11,7 @@ API Docs: https://www.mfapi.in/docs/
 
 Two-step enrichment flow:
 1. search_schemes(query) → Get list of funds with scheme codes
-2. search_and_get_fund(name, threshold) → RapidFuzz match + fetch latest NAV
+2. search_and_get_fund(name, threshold, nav_history_years) → RapidFuzz match + fetch NAV history
 """
 
 from typing import Dict, Any, Optional, List, Tuple
@@ -20,6 +20,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from rapidfuzz import fuzz, process
+from datetime import datetime, timedelta
 
 
 class MFAPIFetcher:
@@ -113,14 +114,15 @@ class MFAPIFetcher:
     def search_and_get_fund(
         self, 
         input_fund_name: str, 
-        fuzzy_threshold: int = 85
+        fuzzy_threshold: int = 85,
+        nav_history_years: int = 10
     ) -> Optional[Dict[str, Any]]:
         """
-        Two-step process to resolve fund and get NAV + ISIN:
+        Three-step process to resolve fund and get NAV history + ISIN:
         
         Step 1: Search for funds matching input name
         Step 2: Use RapidFuzz to find best match among results
-        Step 3: Fetch latest NAV + ISIN for selected fund
+        Step 3: Fetch NAV history + ISIN for selected fund (last N years)
         
         This is the primary method for enrichment.
         
@@ -128,11 +130,13 @@ class MFAPIFetcher:
             Input: "HDFC Mid Cap"
             Search API returns: [{schemeCode: 125499, schemeName: "HDFC Mid Cap Fund - Direct Plan - Growth"}, ...]
             RapidFuzz: "HDFC Mid Cap Fund - Direct Plan - Growth" scores 95% → Selected
-            Latest NAV API returns: {isin_growth: "INF179K01AB9", nav: "1485.50", ...}
+            NAV History API returns: {data: [{date: "26-12-2025", nav: "1485.50"}, ...], ...}
+                                     (10 years of daily NAV)
         
         Args:
             input_fund_name: User-provided fund name (e.g., "HDFC Mid Cap Fund")
             fuzzy_threshold: RapidFuzz token_set_ratio threshold (0-100), default 85
+            nav_history_years: Years of NAV history to fetch, default 10
             
         Returns:
             Dict with keys:
@@ -143,8 +147,9 @@ class MFAPIFetcher:
                 - scheme_type: Open/Closed ended
                 - isin_growth: ISIN for growth option
                 - isin_div_reinvestment: ISIN for dividend reinvestment (if available)
-                - nav: Latest NAV value
-                - nav_date: NAV date (format: DD-MM-YYYY)
+                - current_nav: Latest NAV value (extracted from history)
+                - nav_as_of: Latest NAV date (format: DD-MM-YYYY)
+                - nav_history: Monthly aggregated NAV (Dict[YYYY-MM]: float)
                 - matched_fund_name: Name that matched via RapidFuzz
                 - fuzzy_score: RapidFuzz match score (0-100)
                 - status: "SUCCESS" or "FAILED"
@@ -196,12 +201,12 @@ class MFAPIFetcher:
             f"(fuzzy_score: {score}%, scheme_code: {scheme_code})"
         )
         
-        # STEP 3: Get latest NAV + ISIN
-        self.logger.debug(f"[MFAPI-RESOLVE] Step 3: Fetching latest NAV for scheme {scheme_code}")
-        nav_data = self._get_latest_nav_internal(scheme_code)
+        # STEP 3: Get NAV history (10 years by default)
+        self.logger.debug(f"[MFAPI-RESOLVE] Step 3: Fetching {nav_history_years}-year NAV history for scheme {scheme_code}")
+        nav_data = self._get_nav_history_internal(scheme_code, nav_history_years)
         
         if not nav_data:
-            self.logger.error(f"[MFAPI-RESOLVE] ✗ Failed to fetch NAV for scheme {scheme_code}")
+            self.logger.error(f"[MFAPI-RESOLVE] ✗ Failed to fetch NAV history for scheme {scheme_code}")
             return None
         
         # Combine search result + NAV data
@@ -209,19 +214,141 @@ class MFAPIFetcher:
             "input_fund_name": input_fund_name,
             "matched_fund_name": matched_name,
             "fuzzy_score": score,
-            **nav_data  # Includes: scheme_code, scheme_name, fund_house, isin_growth, nav, nav_date, status
+            **nav_data  # Includes: scheme_code, scheme_name, fund_house, isin_growth, current_nav, nav_as_of, nav_history, status
         }
         
         self.logger.info(
             f"[MFAPI-RESOLVE] ✓ Fund resolved: {matched_name} | "
             f"ISIN: {nav_data.get('isin_growth')} | "
-            f"NAV: {nav_data.get('nav')} ({nav_data.get('nav_date')})"
+            f"Current NAV: {nav_data.get('current_nav')} ({nav_data.get('nav_as_of')}) | "
+            f"History: {len(nav_data.get('nav_history', {}))} months"
         )
         
         return result
     
+    def _get_nav_history_internal(
+        self, 
+        scheme_code: str,
+        nav_history_years: int = 10
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Internal method to fetch NAV history and fund metadata for a scheme.
+        
+        Fetches daily NAV for specified years and aggregates to monthly.
+        Extracts latest NAV for current_nav and nav_as_of fields.
+        
+        Args:
+            scheme_code: Mutual fund scheme code
+            nav_history_years: Years of history to fetch (default: 10)
+            
+        Returns:
+            Dict with NAV history, ISIN, and metadata, or None on error
+        """
+        try:
+            # Calculate date range: now - nav_history_years to now
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=365 * nav_history_years)
+            
+            # Format dates as YYYY-MM-DD for MFAPI
+            start_date_str = start_date.strftime('%Y-%m-%d')
+            end_date_str = end_date.strftime('%Y-%m-%d')
+            
+            # IMPORTANT: Use /mf/{scheme_code} (NOT /mf/{scheme_code}/latest) 
+            # to get historical data with date range parameters
+            url = f"{self.BASE_URL}/mf/{scheme_code}"
+            params = {
+                'startDate': start_date_str,
+                'endDate': end_date_str
+            }
+            
+            self.logger.debug(
+                f"[MFAPI-NAV-HISTORY] Fetching {nav_history_years}-year history for scheme {scheme_code} "
+                f"({start_date_str} to {end_date_str})"
+            )
+            
+            response = self.session.get(url, params=params, timeout=self.TIMEOUT)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if data.get("status") != "SUCCESS":
+                self.logger.warning(f"[MFAPI-NAV-HISTORY] Status: {data.get('status')} for scheme {scheme_code}")
+                return None
+            
+            meta = data.get("meta", {})
+            nav_list = data.get("data", [])
+            
+            if not nav_list:
+                self.logger.warning(f"[MFAPI-NAV-HISTORY] No NAV data for scheme {scheme_code}")
+                return None
+            
+            # Log raw data from MFAPI before aggregation
+            self.logger.info(
+                f"[MFAPI-NAV-HISTORY] Raw data: scheme {scheme_code} returned {len(nav_list)} daily entries. "
+                f"Date range: {nav_list[-1].get('date') if nav_list else 'N/A'} to {nav_list[0].get('date') if nav_list else 'N/A'}"
+            )
+            
+            # Import aggregation function from fund_enricher module
+            import sys
+            from pathlib import Path
+            ROOT = Path(__file__).resolve().parents[3]
+            if str(ROOT) not in sys.path:
+                sys.path.insert(0, str(ROOT))
+            
+            from services.enrichment.fund_enricher import aggregate_nav_to_monthly
+            
+            # Log raw data from MFAPI before aggregation
+            self.logger.info(
+                f"[MFAPI-NAV-HISTORY] Raw data: scheme {scheme_code} returned {len(nav_list)} daily entries. "
+                f"Date range: {nav_list[-1].get('date') if nav_list else 'N/A'} to {nav_list[0].get('date') if nav_list else 'N/A'}"
+            )
+            
+            # Aggregate daily NAV to monthly
+            current_nav, nav_as_of, nav_history = aggregate_nav_to_monthly(nav_list)
+            
+            result = {
+                "scheme_code": meta.get("scheme_code"),
+                "scheme_name": meta.get("scheme_name"),
+                "fund_house": meta.get("fund_house"),
+                "scheme_category": meta.get("scheme_category"),
+                "scheme_type": meta.get("scheme_type"),
+                "isin_growth": meta.get("isin_growth"),
+                "isin_div_reinvestment": meta.get("isin_div_reinvestment"),
+                "current_nav": current_nav,
+                "nav_as_of": nav_as_of,
+                "nav_history": nav_history,
+                "status": "SUCCESS"
+            }
+            
+            self.logger.debug(
+                f"[MFAPI-NAV-HISTORY] ✓ Fetched: Current NAV={result['current_nav']}, "
+                f"Monthly history entries={len(nav_history)}, ISIN={result['isin_growth']}"
+            )
+            
+            # Log month range after aggregation
+            if nav_history:
+                sorted_months = sorted(nav_history.keys())
+                self.logger.info(
+                    f"[MFAPI-NAV-HISTORY] Aggregated to {len(nav_history)} months: "
+                    f"{sorted_months[0]} to {sorted_months[-1]}"
+                )
+            
+            return result
+            
+        except requests.exceptions.Timeout:
+            self.logger.error(f"[MFAPI-NAV-HISTORY] Timeout fetching scheme {scheme_code}")
+            return None
+        except requests.exceptions.ConnectionError:
+            self.logger.error(f"[MFAPI-NAV-HISTORY] Connection error fetching scheme {scheme_code}")
+            return None
+        except Exception as e:
+            self.logger.error(f"[MFAPI-NAV-HISTORY] Error fetching scheme {scheme_code}: {str(e)}")
+            return None
+    
     def _get_latest_nav_internal(self, scheme_code: str) -> Optional[Dict[str, Any]]:
         """
+        DEPRECATED: Use _get_nav_history_internal instead.
+        
         Internal method to fetch latest NAV and fund metadata for a scheme.
         
         Args:
