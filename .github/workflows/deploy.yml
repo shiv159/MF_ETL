@@ -59,3 +59,12 @@ jobs:
             --allow-unauthenticated \
             --port 8081 \
             --quiet
+
+      - name: Allow unauthenticated invocations (IAM)
+        run: |
+          gcloud run services add-iam-policy-binding mf-etl \
+            --member="allUsers" \
+            --role="roles/run.invoker" \
+            --region "${{ env.REGION }}" \
+            --platform managed \
+            --quiet
