@@ -1,0 +1,61 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: ["master"]
+
+env:
+  REGION: us-central1
+  REPO_NAME: mf-etl
+  IMAGE_NAME: mf-etl-app
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Authenticate to Google Cloud using a JSON service account key in secrets.GCP_SA_KEY
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      # Derive PROJECT_ID from the service account key JSON so you don't need a separate secret
+      - name: Set PROJECT_ID and COMMIT_SHA
+        shell: bash
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import json, os
+          key = json.loads(os.environ["GCP_SA_KEY"])
+          print(f"PROJECT_ID={key['project_id']}")
+          PY
+          echo "COMMIT_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        shell: bash
+        run: |
+          IMAGE_URI="${{ env.REGION }}-docker.pkg.dev/${PROJECT_ID}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${COMMIT_SHA}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+          docker build -t "${IMAGE_URI}" .
+          docker push "${IMAGE_URI}"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy mf-etl \
+            --image "${IMAGE_URI}" \
+            --region "${{ env.REGION }}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8081 \
+            --quiet
