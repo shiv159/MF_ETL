@@ -22,4 +22,4 @@ USER appuser
 EXPOSE 8081
 
 # FastAPI entrypoint (bind to Cloud Run service port)
-CMD ["uvicorn", "services.api.main:app", "--host", "0.0.0.0", "--port", "8081"]
+CMD ["python", "-m", "services.api.main"]
