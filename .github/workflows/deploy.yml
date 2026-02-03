@@ -1,33 +1,45 @@
-name: Deploy to Cloud Run
+name: Build and Deploy to Cloud Run
 
 on:
   push:
-    branches: ["master"]
+    branches:
+      - master
 
 env:
   REGION: us-central1
   REPO_NAME: mf-etl
   IMAGE_NAME: mf-etl-app
+  ARTIFACT_REGISTRY: us-central1-docker.pkg.dev
 
 jobs:
-  deploy:
+  build-and-deploy:
+    name: Build and Deploy
     runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
-      - name: Checkout
+      # ============================================
+      # Checkout code
+      # ============================================
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      # Authenticate to Google Cloud using a JSON service account key in secrets.GCP_SA_KEY
-      - name: Auth to Google Cloud
+      # ============================================
+      # Authenticate with Google Cloud
+      # ============================================
+      - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Set up gcloud
+      - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      # Derive PROJECT_ID from the service account key JSON so you don't need a separate secret
-      - name: Set PROJECT_ID and COMMIT_SHA
+      # Derive PROJECT_ID from the service account key JSON
+      - name: Set PROJECT_ID
         shell: bash
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
@@ -37,34 +49,79 @@ jobs:
           key = json.loads(os.environ["GCP_SA_KEY"])
           print(f"PROJECT_ID={key['project_id']}")
           PY
-          echo "COMMIT_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
 
+      # ============================================
+      # Log in to Docker Hub
+      # ============================================
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ============================================
+      # Configure Docker for Artifact Registry
+      # ============================================
       - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+        run: gcloud auth configure-docker ${{ env.ARTIFACT_REGISTRY }} --quiet
 
-      - name: Build and push image
-        shell: bash
+      # ============================================
+      # Create Artifact Registry repository (if needed)
+      # ============================================
+      - name: Create Artifact Registry repository
         run: |
-          IMAGE_URI="${{ env.REGION }}-docker.pkg.dev/${PROJECT_ID}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${COMMIT_SHA}"
-          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
-          docker build -t "${IMAGE_URI}" .
-          docker push "${IMAGE_URI}"
+          gcloud artifacts repositories create ${{ env.REPO_NAME }} \
+            --repository-format=docker \
+            --location=${{ env.REGION }} \
+            --description="Docker repository for ${{ env.IMAGE_NAME }}" \
+            --quiet || true
 
+      # ============================================
+      # Build and push Docker image
+      # ============================================
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag ${{ env.ARTIFACT_REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --tag ${{ env.ARTIFACT_REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:latest \
+            --tag ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --tag ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest \
+            .
+
+      - name: Push Docker image to Artifact Registry
+        run: |
+          docker push ${{ env.ARTIFACT_REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.ARTIFACT_REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Push Docker image to Docker Hub
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+
+      # ============================================
+      # Deploy to Cloud Run
+      # ============================================
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy mf-etl \
-            --image "${IMAGE_URI}" \
-            --region "${{ env.REGION }}" \
+            --image ${{ env.ARTIFACT_REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --region ${{ env.REGION }} \
             --platform managed \
             --allow-unauthenticated \
             --port 8081 \
+            --memory 512Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 2 \
             --quiet
 
-      - name: Allow unauthenticated invocations (IAM)
+      # ============================================
+      # Output the service URL
+      # ============================================
+      - name: Get Cloud Run service URL
         run: |
-          gcloud run services add-iam-policy-binding mf-etl \
-            --member="allUsers" \
-            --role="roles/run.invoker" \
-            --region "${{ env.REGION }}" \
-            --platform managed \
-            --quiet
+          SERVICE_URL=$(gcloud run services describe mf-etl \
+            --region ${{ env.REGION }} \
+            --format 'value(status.url)')
+          echo "🚀 Service deployed to: $SERVICE_URL"
+          echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_OUTPUT
