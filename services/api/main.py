@@ -21,6 +21,8 @@ Typical usage:
     uvicorn services.api.main:app --host 0.0.0.0 --port 8081
 """
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -33,6 +35,12 @@ from services.api.dependencies import (
 from services.api.middleware.correlation_id import add_correlation_id_middleware
 from services.api.routes import register_routes
 from services.api.exceptions import register_exception_handlers
+
+
+def get_allowed_origins() -> list[str]:
+    """Read comma-separated CORS origins from environment."""
+    raw_origins = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:8080")
+    return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 
 # Initialize logger and services
@@ -52,7 +60,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080"],
+    allow_origins=get_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

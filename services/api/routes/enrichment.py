@@ -195,20 +195,17 @@ def register_enrichment_routes(app_router: APIRouter, enricher: FundEnricher, lo
             return await _run_enrichment_concurrent(enricher, request, logger)
         
         try:
-            # Execute with retry logic for timeout and server errors
-            payload = await retry_with_backoff(
-                enrichment_with_retries,
-                max_retries=MAX_RETRIES,
-                initial_delay=INITIAL_RETRY_DELAY,
-                max_delay=MAX_RETRY_DELAY,
-                backoff_multiplier=RETRY_BACKOFF_MULTIPLIER,
-                operation_name=f"Enrichment for upload_id={request.upload_id}",
-                logger=logger
-            )
-            
-            # Also apply timeout to the entire enrichment process
+            # Execute enrichment once with retry logic under a global timeout.
             payload = await asyncio.wait_for(
-                asyncio.create_task(enrichment_with_retries()),
+                retry_with_backoff(
+                    enrichment_with_retries,
+                    max_retries=MAX_RETRIES,
+                    initial_delay=INITIAL_RETRY_DELAY,
+                    max_delay=MAX_RETRY_DELAY,
+                    backoff_multiplier=RETRY_BACKOFF_MULTIPLIER,
+                    operation_name=f"Enrichment for upload_id={request.upload_id}",
+                    logger=logger,
+                ),
                 timeout=TIMEOUT_SECONDS,
             )
             
