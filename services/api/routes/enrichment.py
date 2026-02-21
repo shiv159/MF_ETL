@@ -144,17 +144,30 @@ async def _run_enrichment_concurrent(
                 error_categories[ErrorCategory.ENRICHMENT_ERROR.value] += 1
                 logger.debug(f"Failed to enrich {idx + 1}/{len(validated_holdings)}: {fund_name}")
 
+    total_attempted = len(validated_holdings) if validated_holdings else 0
+    successfully_enriched = len(enriched_funds)
+    failed_to_enrich = total_attempted - successfully_enriched
+
+    if total_attempted == 0 or successfully_enriched == 0:
+        enrichment_status = "failed"
+    elif failed_to_enrich > 0:
+        enrichment_status = "partial"
+    else:
+        enrichment_status = "completed"
+
     enrichment_quality = {
-        "successfully_enriched": len(enriched_funds),
-        "failed_to_enrich": len(validated_holdings) - len(enriched_funds) if validated_holdings else 0,
+        "successfully_enriched": successfully_enriched,
+        "failed_to_enrich": failed_to_enrich,
         "validation_failures": validation_failures,
         "warnings": warnings,
         "error_breakdown": error_categories,  # Include detailed error categorization
+        "enrichment_status_reason": enrichment_status,
     }
 
     return {
         "enriched_funds": enriched_funds,
         "enrichment_quality": enrichment_quality,
+        "enrichment_status": enrichment_status,
     }
 
 
@@ -214,7 +227,7 @@ def register_enrichment_routes(app_router: APIRouter, enricher: FundEnricher, lo
 
             response = EnrichmentResponse(
                 upload_id=request.upload_id,
-                status="completed",
+                status=payload.get("enrichment_status", "completed"),
                 duration_seconds=duration,
                 enriched_funds=payload["enriched_funds"],
                 enrichment_quality=quality,
