@@ -12,6 +12,22 @@ import pandas as pd
 from typing import Optional, Dict, Any
 import mstarpy
 
+# --- Monkeypatch Selenium Options for Docker Compatibility ---
+try:
+    from selenium.webdriver.chrome.options import Options
+    _original_add_argument = Options.add_argument
+
+    def _patched_add_argument(self, argument):
+        _original_add_argument(self, argument)
+        # mstarpy hardcodes "--headless=new". When it adds this, we sneak in safe Docker flags.
+        if argument in ("--headless=new", "--headless"):
+            _original_add_argument(self, "--no-sandbox")
+            _original_add_argument(self, "--disable-dev-shm-usage")
+
+    Options.add_argument = _patched_add_argument
+except ImportError:
+    pass
+# -------------------------------------------------------------
 
 class MstarPyFetcher:
     """Fetcher for mutual fund data using mstarpy (Morningstar)"""
@@ -125,9 +141,16 @@ class MstarPyFetcher:
         try:
             self._log('info', f"Fetching asset allocation for fund: {fund_isin}")
             fund = mstarpy.Funds(term=fund_isin)
-            assets = fund.asset_allocation()
             
-            if assets is not None and not assets.empty:
+            assets = None
+            if hasattr(fund, 'asset_allocation'):
+                assets = fund.asset_allocation()
+            elif hasattr(fund, 'allocationMap'):
+                assets = fund.allocationMap()
+            elif hasattr(fund, 'allocationWeighting'):
+                assets = fund.allocationWeighting()
+
+            if assets is not None:
                 self._log('info', f"Successfully fetched asset allocation")
                 return assets
             else:
@@ -155,29 +178,57 @@ class MstarPyFetcher:
             
             # Fund name
             try:
-                details['name'] = fund.name()
+                if hasattr(fund, 'name'):
+                    name_attr = getattr(fund, 'name')
+                    details['name'] = name_attr() if callable(name_attr) else name_attr
+                else:
+                    details['name'] = fund.dataPoint('name')[0].get('name') if getattr(fund, 'dataPoint', None) else None
             except:
                 details['name'] = None
-            
+
             # Fund rating
             try:
-                details['rating'] = fund.rating()
+                if hasattr(fund, 'rating') and callable(fund.rating):
+                    details['rating'] = fund.rating()
+                elif hasattr(fund, 'starRatingFundDesc'):
+                    rating_data = fund.starRatingFundDesc()
+                    details['rating'] = rating_data.get('starRatingFund') if isinstance(rating_data, dict) else None
+                elif hasattr(fund, 'dataPoint'):
+                    points = fund.dataPoint(['starRatingM255'])
+                    details['rating'] = points[0].get('starRatingM255') if points else None
             except:
                 details['rating'] = None
-            
+
             # Fund category
             try:
-                details['category'] = fund.category()
+                if hasattr(fund, 'category') and callable(fund.category):
+                    details['category'] = fund.category()
+                elif hasattr(fund, 'dataPoint'):
+                    points = fund.dataPoint(['categoryName'])
+                    details['category'] = points[0].get('categoryName') if points else None
             except:
                 details['category'] = None
-            
+
             # NAV
             try:
-                details['nav'] = fund.nav()
+                if hasattr(fund, 'nav') and callable(fund.nav):
+                    import inspect
+                    import datetime
+                    sig = inspect.signature(fund.nav)
+                    if 'start_date' in sig.parameters:
+                        # v9 signature requires date range
+                        end_date = datetime.datetime.today()
+                        start_date = end_date - datetime.timedelta(days=7)
+                        nav_data = fund.nav(start_date=start_date, end_date=end_date)
+                        if nav_data and isinstance(nav_data, list):
+                            # The latest NAV is typically the last element
+                            details['nav'] = nav_data[-1].get('nav')
+                        else:
+                            details['nav'] = None
+                    else:
+                        details['nav'] = fund.nav()
             except:
                 details['nav'] = None
-            
-            self._log('info', f"Successfully fetched fund details for {fund_isin}")
             
         except Exception as e:
             self._log('error', f"Error fetching fund details for {fund_isin}: {str(e)}")
