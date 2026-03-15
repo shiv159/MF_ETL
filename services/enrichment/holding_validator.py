@@ -67,6 +67,14 @@ def validate_holdings(holdings: List[Dict]) -> Tuple[List[Dict], List[str]]:
         units = _safe_numeric(h.get('units'), float, None)
         nav = _safe_numeric(h.get('nav'), float, None)
         value = _safe_numeric(h.get('value'), float, None)
+
+        if units is not None and units <= 0:
+            warnings.append(f"Skipping holding '{fund_name}' because units must be positive")
+            continue
+
+        if nav is not None and nav <= 0:
+            warnings.append(f"Skipping holding '{fund_name}' because nav must be positive")
+            continue
         
         # If units missing, try to compute from value and nav
         if units is None:
