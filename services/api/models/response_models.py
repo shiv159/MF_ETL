@@ -4,6 +4,7 @@ from pydantic import BaseModel, PrivateAttr
 
 class EnrichedFund(BaseModel):
     fund_name: str
+    input_fund_name: Optional[str] = None
     isin: Optional[str]
     amc: Optional[str]
     category: Optional[str]

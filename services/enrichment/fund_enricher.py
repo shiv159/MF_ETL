@@ -442,7 +442,8 @@ class FundEnricher:
         
         # ===== Create EnrichedFund object =====
         enriched = EnrichedFund(
-            fund_name=fund_name,
+            fund_name=scheme_name if scheme_name else fund_name,
+            input_fund_name=fund_name,
             isin=fund_isin,
             amc=amc,
             category=category,

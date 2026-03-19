@@ -526,6 +526,10 @@ class MFAPIFetcher:
             elif 'reinvestment' in name_lower or 'idcw' in name_lower:
                 score -= 20
             
+            # Penalize Bonus options (often contain "Growth" so they need offset)
+            if 'bonus' in name_lower:
+                score -= 20
+            
             # Direct vs Regular is SECONDARY preference (bonus/penalty applied on top)
             if 'direct' in name_lower:
                 score += 10
