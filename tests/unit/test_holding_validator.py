@@ -222,3 +222,15 @@ class TestPartialSuccess:
         validated, warnings = validate_holdings(holdings)
         assert len(validated) == 1
         assert validated[0]["purchase_date"] == "2025-12-13"
+
+    def test_name_only_holding_is_allowed(self):
+        """Test that enrichment-only requests can pass with just a fund name."""
+        holdings = [
+            {"fund_name": "Metadata Only Fund"}
+        ]
+        validated, warnings = validate_holdings(holdings)
+        assert len(validated) == 1
+        assert validated[0]["fund_name"] == "Metadata Only Fund"
+        assert validated[0]["units"] is None
+        assert validated[0]["nav"] is None
+        assert warnings == []

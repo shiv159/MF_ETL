@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - test
 
 env:
   REGION: us-central1
@@ -109,7 +110,6 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --port 8081 \
-            --memory 512Mi \
             --cpu 1 \
             --min-instances 0 \
             --max-instances 2 \

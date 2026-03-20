@@ -4,7 +4,7 @@ import asyncio
 import time
 import logging
 import uuid
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -34,6 +34,55 @@ from services.api.utils import (
 from services.enrichment.mstarpy_helper import get_mstar_metadata
 
 router = APIRouter()
+
+
+def _build_quality_metadata(fund_dict: Dict[str, Any]) -> Dict[str, Any]:
+    missing_fields: List[str] = []
+    quality_flags: List[str] = []
+
+    if not fund_dict.get("current_nav"):
+        missing_fields.append("current_nav")
+        quality_flags.append("missing_nav")
+    if not fund_dict.get("nav_as_of"):
+        missing_fields.append("nav_as_of")
+        quality_flags.append("missing_nav_timestamp")
+
+    sector_allocation = fund_dict.get("sector_allocation")
+    if not sector_allocation:
+        missing_fields.append("sector_allocation")
+        quality_flags.append("missing_sector_allocation")
+
+    top_holdings = fund_dict.get("top_holdings")
+    if not top_holdings:
+        missing_fields.append("top_holdings")
+        quality_flags.append("missing_top_holdings")
+
+    metadata = fund_dict.get("mstarpy_metadata")
+    if not metadata:
+        missing_fields.append("mstarpy_metadata")
+        quality_flags.append("missing_metadata")
+    else:
+        nav_history = metadata.get("nav_history") if isinstance(metadata, dict) else None
+        if not nav_history:
+            missing_fields.append("nav_history")
+            quality_flags.append("missing_nav_history")
+
+    source_timestamps = {
+        "nav_as_of": fund_dict.get("nav_as_of"),
+        "metadata_as_of": metadata.get("esgAsOfDate") if isinstance(metadata, dict) else None,
+    }
+    fund_dict["quality_flags"] = quality_flags
+    fund_dict["missing_fields"] = missing_fields
+    fund_dict["source_timestamps"] = source_timestamps
+
+    if isinstance(metadata, dict):
+        metadata["data_quality"] = {
+            "quality_flags": quality_flags,
+            "missing_fields": missing_fields,
+            "source_timestamps": source_timestamps,
+        }
+        fund_dict["mstarpy_metadata"] = metadata
+    return fund_dict
 
 
 async def _run_enrichment_concurrent(
@@ -135,6 +184,7 @@ async def _run_enrichment_concurrent(
 
                 # Ensure nav_history never leaks to the top-level payload
                 fund_dict.pop('nav_history', None)
+                fund_dict = _build_quality_metadata(fund_dict)
 
                 enriched_funds.append(fund_dict)
                 logger.debug(f"Successfully enriched {idx + 1}/{len(validated_holdings)}: {fund_name}")
