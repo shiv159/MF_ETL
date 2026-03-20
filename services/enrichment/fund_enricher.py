@@ -398,11 +398,13 @@ class FundEnricher:
                 break
         
         scheme_name = mfapi_result.get('scheme_name')
+        matched_fund_name = mfapi_result.get('matched_fund_name')
         amc = mfapi_result.get('fund_house')
         category = mfapi_result.get('scheme_category')
         current_nav = mfapi_result.get('current_nav')
         nav_as_of = mfapi_result.get('nav_as_of')
         nav_history = mfapi_result.get('nav_history', {})
+        canonical_name = scheme_name or matched_fund_name or fund_name
         
         # ===== PHASE 2: Fetch Holdings via MstarPy =====
         holdings = None
@@ -442,7 +444,7 @@ class FundEnricher:
         
         # ===== Create EnrichedFund object =====
         enriched = EnrichedFund(
-            fund_name=scheme_name if scheme_name else fund_name,
+            fund_name=canonical_name,
             input_fund_name=fund_name,
             isin=fund_isin,
             amc=amc,
@@ -458,7 +460,7 @@ class FundEnricher:
         enriched._nav_history = nav_history
         
         self.logger.info(
-            f"[ENRICH] ✓ Enrichment complete for '{fund_name}': "
+            f"[ENRICH] ✓ Enrichment complete for input '{fund_name}' as '{canonical_name}': "
             f"Current NAV={current_nav}, NAV History={len(nav_history) if nav_history else 0} months, "
             f"Sectors={len(sectors) if sectors else 0}, "
             f"Holdings={len(holdings) if holdings else 0}"
