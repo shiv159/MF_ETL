@@ -7,6 +7,7 @@ on:
       - test
 
 env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   REGION: us-central1
   REPO_NAME: mf-etl
   IMAGE_NAME: mf-etl-app
@@ -34,22 +35,13 @@ jobs:
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-
-      # Derive PROJECT_ID from the service account key JSON
-      - name: Set PROJECT_ID
-        shell: bash
-        env:
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        run: |
-          python - <<'PY' >> "$GITHUB_ENV"
-          import json, os
-          key = json.loads(os.environ["GCP_SA_KEY"])
-          print(f"PROJECT_ID={key['project_id']}")
-          PY
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       # ============================================
       # Log in to Docker Hub
