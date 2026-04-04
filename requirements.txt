@@ -1,6 +1,6 @@
 # Core financial data libraries
 # mftool==1.1.0  # DEPRECATED - Replaced by MFAPI.in
-mstarpy>=0.0.5
+mstarpy>=9.0.3
 jugaad-data>=0.25
 morningstar-fund-scraper==0.1.3
 nsescraper==0.0.8
