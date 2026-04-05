@@ -5,6 +5,9 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# Configure Chrome flags for mstarpy native Docker compatibility (mstarpy >= 9.0.3)
+ENV SELENIUM_CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage"
+
 # Install Google Chrome for mstarpy (Selenium)
 RUN apt-get update && apt-get install -y \
     wget \

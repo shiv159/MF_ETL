@@ -12,22 +12,6 @@ import pandas as pd
 from typing import Optional, Dict, Any
 import mstarpy
 
-# --- Monkeypatch Selenium Options for Docker Compatibility ---
-try:
-    from selenium.webdriver.chrome.options import Options
-    _original_add_argument = Options.add_argument
-
-    def _patched_add_argument(self, argument):
-        _original_add_argument(self, argument)
-        # mstarpy hardcodes "--headless=new". When it adds this, we sneak in safe Docker flags.
-        if argument in ("--headless=new", "--headless"):
-            _original_add_argument(self, "--no-sandbox")
-            _original_add_argument(self, "--disable-dev-shm-usage")
-
-    Options.add_argument = _patched_add_argument
-except ImportError:
-    pass
-# -------------------------------------------------------------
 
 class MstarPyFetcher:
     """Fetcher for mutual fund data using mstarpy (Morningstar)"""
