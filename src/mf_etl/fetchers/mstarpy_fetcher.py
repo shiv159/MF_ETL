@@ -24,6 +24,7 @@ class MstarPyFetcher:
             logger: Logger instance for logging operations
         """
         self.logger = logger
+        self._fund_cache = {}
     
     def _log(self, level: str, message: str):
         """Internal logging helper"""
@@ -40,9 +41,13 @@ class MstarPyFetcher:
         Returns:
             mstarpy.Funds object or None if not found
         """
+        if term in self._fund_cache:
+            return self._fund_cache[term]
+            
         try:
             self._log('debug', f"Looking up fund: {term}")
             fund = mstarpy.Funds(term=term)
+            self._fund_cache[term] = fund
             self._log('debug', f"Successfully created Funds object for: {term}")
             return fund
         except Exception as e:
@@ -62,7 +67,9 @@ class MstarPyFetcher:
         """
         try:
             self._log('info', f"Fetching holdings for fund: {fund_isin}")
-            fund = mstarpy.Funds(term=fund_isin)
+            fund = self.get_fund(fund_isin)
+            if fund is None:
+                return None
             holdings = fund.holdings()
             
             if holdings is not None and not holdings.empty:
@@ -90,7 +97,9 @@ class MstarPyFetcher:
         """
         try:
             self._log('info', f"Fetching sector allocation for fund: {fund_isin}")
-            fund = mstarpy.Funds(term=fund_isin)
+            fund = self.get_fund(fund_isin)
+            if fund is None:
+                return None
             sectors = fund.sector()
             
             if sectors is not None:
@@ -124,7 +133,9 @@ class MstarPyFetcher:
         """
         try:
             self._log('info', f"Fetching asset allocation for fund: {fund_isin}")
-            fund = mstarpy.Funds(term=fund_isin)
+            fund = self.get_fund(fund_isin)
+            if fund is None:
+                return None
             
             assets = None
             if hasattr(fund, 'asset_allocation'):
@@ -158,7 +169,9 @@ class MstarPyFetcher:
         details = {'isin': fund_isin}
         
         try:
-            fund = mstarpy.Funds(term=fund_isin)
+            fund = self.get_fund(fund_isin)
+            if fund is None:
+                raise ValueError(f"Could not initialize fund object for {fund_isin}")
             
             # Fund name
             try:
