@@ -6,13 +6,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 # Configure Chrome flags for mstarpy native Docker compatibility (mstarpy >= 9.0.3)
-ENV SELENIUM_CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage"
+ENV SELENIUM_CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage" \
+    MSTARPY_BROWSER_BOOTSTRAP_WAIT_SECONDS=8
 
 # Install Google Chrome for mstarpy (Selenium)
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     unzip \
+    xvfb \
+    xauth \
     && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
@@ -36,5 +39,5 @@ USER appuser
 
 EXPOSE 8081
 
-# FastAPI entrypoint (bind to Cloud Run service port)
-CMD ["python", "-m", "services.api.main"]
+# FastAPI entrypoint. xvfb-run provides the virtual display needed for headed Chrome in Cloud Run.
+CMD ["xvfb-run", "-a", "python", "-m", "services.api.main"]

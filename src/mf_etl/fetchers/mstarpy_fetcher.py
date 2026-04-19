@@ -10,7 +10,8 @@ This module provides functionality to:
 
 import pandas as pd
 from typing import Optional, Dict, Any
-import mstarpy
+
+from src.mf_etl.utils.mstarpy_compat import get_mstarpy
 
 
 class MstarPyFetcher:
@@ -25,6 +26,7 @@ class MstarPyFetcher:
         """
         self.logger = logger
         self._fund_cache = {}
+        self._mstarpy = get_mstarpy()
     
     def _log(self, level: str, message: str):
         """Internal logging helper"""
@@ -46,12 +48,12 @@ class MstarPyFetcher:
             
         try:
             self._log('debug', f"Looking up fund: {term}")
-            fund = mstarpy.Funds(term=term)
+            fund = self._mstarpy.Funds(term=term)
             self._fund_cache[term] = fund
             self._log('debug', f"Successfully created Funds object for: {term}")
             return fund
         except Exception as e:
-            self._log('debug', f"Error creating Funds object for '{term}': {str(e)}")
+            self._log('error', f"Error creating Funds object for '{term}': {str(e)}")
             return None
     
     def get_fund_holdings(self, fund_isin: str, top_n: int = 20) -> Optional[pd.DataFrame]:

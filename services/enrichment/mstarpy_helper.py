@@ -7,6 +7,8 @@ from typing import Optional, Dict, Any
 import logging
 import asyncio
 
+from src.mf_etl.utils.mstarpy_compat import get_mstarpy
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,7 +37,7 @@ async def get_mstar_metadata(isin: str) -> Optional[Dict[str, Any]]:
     `mstarpy` is not available. Failures are logged for debugging.
     """
     try:
-        import mstarpy as ms
+        ms = get_mstarpy()
     except ImportError:
         logger.debug("mstarpy not available; skipping mstar metadata for ISIN=%s", isin)
         return None
