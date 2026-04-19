@@ -17,6 +17,7 @@ pyyaml>=6.0
 beautifulsoup4==4.9.3
 rapidfuzz>=3.0.0
 urllib3>=1.26.0  # For retry handling
+pyvirtualdisplay>=3.0
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0

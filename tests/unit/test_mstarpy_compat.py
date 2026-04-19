@@ -137,3 +137,32 @@ def test_get_mstarpy_supports_browser_options_layout(monkeypatch):
     assert "--headless" not in option_args
     assert "--disable-blink-features=AutomationControlled" in option_args
     assert session.cookies.values["session-id"] == "cookie-value"
+
+
+def test_browser_display_uses_pyvirtualdisplay_on_linux_without_display(monkeypatch):
+    compat = importlib.import_module("src.mf_etl.utils.mstarpy_compat")
+    compat = importlib.reload(compat)
+
+    events = []
+
+    class _FakeDisplay:
+        def __init__(self, visible, size):
+            events.append(("init", visible, size))
+
+        def start(self):
+            events.append("start")
+
+        def stop(self):
+            events.append("stop")
+
+    fake_module = ModuleType("pyvirtualdisplay")
+    fake_module.Display = _FakeDisplay
+
+    monkeypatch.setattr(compat.sys, "platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setitem(sys.modules, "pyvirtualdisplay", fake_module)
+
+    with compat._browser_display():
+        events.append("inside")
+
+    assert events == [("init", False, (1920, 1080)), "start", "inside", "stop"]

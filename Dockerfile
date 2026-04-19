@@ -15,7 +15,6 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     unzip \
     xvfb \
-    xauth \
     && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
@@ -39,5 +38,5 @@ USER appuser
 
 EXPOSE 8081
 
-# FastAPI entrypoint. xvfb-run provides the virtual display needed for headed Chrome in Cloud Run.
-CMD ["xvfb-run", "-a", "python", "-m", "services.api.main"]
+# FastAPI entrypoint. Browser display setup happens only when mstarpy needs it.
+CMD ["python", "-m", "services.api.main"]

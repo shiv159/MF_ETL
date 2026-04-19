@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import sys
 import time
 from contextlib import contextmanager
 from threading import Lock
@@ -20,6 +21,33 @@ def _browser_bootstrap_wait_seconds() -> float:
         return max(0.0, float(raw_value))
     except ValueError:
         return 8.0
+
+
+def _needs_virtual_display() -> bool:
+    """Use Xvfb only for Linux containers that lack a display."""
+    return sys.platform.startswith("linux") and not os.getenv("DISPLAY")
+
+
+@contextmanager
+def _browser_display():
+    """Create a temporary virtual display only when the environment needs one."""
+    if not _needs_virtual_display():
+        yield
+        return
+
+    try:
+        display_cls = importlib.import_module("pyvirtualdisplay").Display
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "pyvirtualdisplay is required on Linux when DISPLAY is unavailable"
+        ) from exc
+
+    display = display_cls(visible=False, size=(1920, 1080))
+    display.start()
+    try:
+        yield
+    finally:
+        display.stop()
 
 
 def _patch_mstarpy(module: ModuleType) -> None:
@@ -68,27 +96,28 @@ def _patch_mstarpy(module: ModuleType) -> None:
             return options
 
         def _init_browser_session(self) -> None:
-            options = _build_headed_options()
+            with _browser_display():
+                options = _build_headed_options()
 
-            if webdriver_module is not None and all(
-                hasattr(search, attr) for attr in ("Service", "ChromeDriverManager")
-            ):
-                driver = webdriver_module.Chrome(
-                    service=search.Service(search.ChromeDriverManager().install()),
-                    options=options,
-                )
-            else:
-                if webdriver_module is None:
-                    raise AttributeError("Unable to locate Chrome webdriver in mstarpy")
-                driver = webdriver_module.Chrome(options=options)
+                if webdriver_module is not None and all(
+                    hasattr(search, attr) for attr in ("Service", "ChromeDriverManager")
+                ):
+                    driver = webdriver_module.Chrome(
+                        service=search.Service(search.ChromeDriverManager().install()),
+                        options=options,
+                    )
+                else:
+                    if webdriver_module is None:
+                        raise AttributeError("Unable to locate Chrome webdriver in mstarpy")
+                    driver = webdriver_module.Chrome(options=options)
 
-            try:
-                driver.get("https://global.morningstar.com")
-                time.sleep(_browser_bootstrap_wait_seconds())
-                cookies = driver.get_cookies()
-                user_agent = driver.execute_script("return navigator.userAgent")
-            finally:
-                driver.quit()
+                try:
+                    driver.get("https://global.morningstar.com")
+                    time.sleep(_browser_bootstrap_wait_seconds())
+                    cookies = driver.get_cookies()
+                    user_agent = driver.execute_script("return navigator.userAgent")
+                finally:
+                    driver.quit()
 
             self.cookies.clear()
             for cookie in cookies:
@@ -114,12 +143,13 @@ def _patch_mstarpy(module: ModuleType) -> None:
             def _get_webdriver():
                 driver = None
                 try:
-                    if webdriver_module is None:
-                        raise AttributeError("Unable to locate Chrome webdriver in mstarpy")
-                    driver = webdriver_module.Chrome(options=_build_headed_options())
-                    if active_webdrivers is not None:
-                        active_webdrivers.add(driver)
-                    yield driver
+                    with _browser_display():
+                        if webdriver_module is None:
+                            raise AttributeError("Unable to locate Chrome webdriver in mstarpy")
+                        driver = webdriver_module.Chrome(options=_build_headed_options())
+                        if active_webdrivers is not None:
+                            active_webdrivers.add(driver)
+                        yield driver
                 finally:
                     if driver:
                         try:
