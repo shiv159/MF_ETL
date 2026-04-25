@@ -22,6 +22,18 @@ Typical usage:
 """
 
 import os
+import sys
+import subprocess
+import atexit
+
+if sys.platform.startswith("linux"):
+    try:
+        # Start Xvfb for headless Chrome/mstarpy support
+        _xvfb = subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1280x720x24"])
+        os.environ["DISPLAY"] = ":99"
+        atexit.register(_xvfb.terminate)
+    except FileNotFoundError:
+        pass
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
